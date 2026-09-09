@@ -5,11 +5,16 @@ Pour les auxiliaires de recherche. Aucune programmation requise.
 ## Une seule fois, sur votre poste
 
 1. Installez Python 3.10 ou plus récent depuis python.org.
-2. Ouvrez le Terminal (macOS) ou l'Invite de commandes (Windows) et lancez :
+2. Ouvrez le Terminal (macOS) ou l'Invite de commandes (Windows), copiez-y
+   cette ligne entière, puis appuyez sur Entrée :
 
    ```
-   pip install verbatim
+   pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"
    ```
+
+   Les guillemets sont nécessaires. Ne lancez **pas** `pip install verbatim`
+   seul : ce nom appartient à un autre programme, sans rapport, sur l'index des
+   paquets Python, et vous installeriez le mauvais outil.
 
 3. Seulement si vous convertirez des PDF **numérisés**, installez aussi
    Tesseract :
