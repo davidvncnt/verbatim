@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Test corpus: real documents are not committed. Put them here locally.
+tests/corpus/*
+!tests/corpus/README.md
+.DS_Store

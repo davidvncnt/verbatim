@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "verbatim"
+version = "0.1.0"
+description = "Faithful PDF to plain-text conversion for international environmental agreement texts"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "davidvncnt" }]
+keywords = ["pdf", "text-extraction", "ocr", "treaty", "iea"]
+
+# Deliberately small. pdfplumber (MIT) is used rather than PyMuPDF (AGPL) so
+# that this package can stay MIT; pdfplumber already renders pages through
+# pypdfium2, so the reviewer needs no extra rendering dependency.
+dependencies = [
+    "pdfplumber>=0.11",
+    "pypdf>=4.0",
+    "numpy>=1.24",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+ocr = ["pytesseract>=0.3.10"]
+model-ocr = ["requests>=2.28"]
+report = ["openpyxl>=3.1"]
+lang = ["langdetect>=1.0.9"]
+all = [
+    "pytesseract>=0.3.10",
+    "requests>=2.28",
+    "openpyxl>=3.1",
+    "langdetect>=1.0.9",
+]
+dev = ["pytest>=7.4", "ruff>=0.6", "reportlab>=4.0"]
+
+[project.scripts]
+verbatim = "verbatim.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/davidvncnt/verbatim"
+
+[tool.setuptools.packages.find]
+include = ["verbatim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "corpus: needs the real hard-case corpus in tests/corpus",
+    "golden: byte-for-byte comparison against the vendored reference script",
+    "ocr: needs Tesseract installed",
+]
+
+[tool.ruff]
+line-length = 96
+target-version = "py310"
+# The vendored script is frozen evidence, not source we maintain: it defines
+# what "no behaviour change" means for the port and must not be reformatted.
+extend-exclude = ["tests/reference"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",
+    # `l` names a Line throughout the extraction modules, as it does in the
+    # script they were split out of. Renaming it would make the port harder to
+    # diff against that script for no behavioural gain.
+    "E741",
+    # Deliberate: OCR, imaging and reporting dependencies are optional extras,
+    # imported inside the functions that need them so that a plain text-layer
+    # conversion runs without Tesseract, requests or openpyxl installed.
+    "E402",
+    # zip() strict= would change behaviour on mismatched lengths in ported code.
+    "B905",
+]
