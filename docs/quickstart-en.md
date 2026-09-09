@@ -5,11 +5,16 @@ For research assistants. No programming needed.
 ## Once, on your machine
 
 1. Install Python 3.10 or newer from python.org.
-2. Open Terminal (macOS) or Command Prompt (Windows) and run:
+2. Open Terminal (macOS) or Command Prompt (Windows) and copy in this whole
+   line, then press Enter:
 
    ```
-   pip install verbatim
+   pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"
    ```
+
+   The quotation marks matter. Do **not** run `pip install verbatim` on its own:
+   that name belongs to a different, unrelated program on the Python package
+   index, and you would end up with the wrong tool.
 
 3. Only if you will convert **scanned** PDFs, also install Tesseract:
    - macOS: `brew install tesseract tesseract-lang`
