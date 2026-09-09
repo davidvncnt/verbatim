@@ -40,9 +40,21 @@ find a six-word problem.
 
 ## Install
 
+Not on PyPI. **`pip install verbatim` installs someone else's package** — the
+name belongs to an unrelated speech-to-text project. Install from this
+repository instead:
+
 ```bash
-pip install verbatim
+pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"
 ```
+
+That needs no `git`, which matters on Windows. With git available,
+`pip install "verbatim[all] @ git+https://github.com/davidvncnt/verbatim.git"`
+does the same. For development, clone and `pip install -e ".[dev,all]"`.
+
+The `[all]` extra pulls in the optional pieces: `pytesseract` for scans,
+`requests` for the model-OCR path, `openpyxl` for reports, `langdetect` for
+language gating. Without it you get the deterministic text-layer path only.
 
 For scanned PDFs, also install Tesseract:
 

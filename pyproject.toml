@@ -3,6 +3,12 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
+# NOTE: the distribution name "verbatim" is already taken on PyPI by an
+# unrelated speech-to-text project (pypi.org/project/verbatim). This package is
+# installed from the repository, not from PyPI, so the collision is harmless
+# today — but publishing would require a different distribution name, e.g.
+# "verbatim-iea". The import package and the console command can stay
+# "verbatim" either way.
 name = "verbatim"
 version = "0.1.0"
 description = "Faithful PDF to plain-text conversion for international environmental agreement texts"
