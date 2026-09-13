@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 # "verbatim-iea". The import package and the console command can stay
 # "verbatim" either way.
 name = "verbatim"
-version = "0.1.0"
+version = "0.2.0"
 description = "Faithful PDF to plain-text conversion for international environmental agreement texts"
 readme = "README.md"
 license = "MIT"

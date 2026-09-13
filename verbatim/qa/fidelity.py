@@ -72,6 +72,9 @@ class Finding:
     char_end: int | None = None
     page: int | None = None
     detail: str = ""
+    # A rectangle on the page, for findings located in the PDF rather than the
+    # text — a passage missing from the text has no position in the text.
+    bbox: tuple | None = None
 
     def message(self, lang: str | None = None) -> str:
         """Plain language, in the reader's language.
@@ -88,6 +91,7 @@ class Finding:
                 "params": self.params, "char_start": self.char_start,
                 "char_end": self.char_end, "page": self.page,
                 "detail": self.detail,
+                "bbox": list(self.bbox) if self.bbox else None,
                 "message_en": self.message("en"),
                 "message_fr": self.message("fr")}
 
@@ -414,8 +418,12 @@ def check_document(output_text: str, reference_text: str, config: dict, *,
     sc = scan(output_text)
     if sc["scrambled"]:
         hits = locate(output_text, sc["scrambled"])
+        # As calibrated in check_txt.py on the real corpus: one interleaved word
+        # is worth a look, two or more mean the text layer is scrambled.
         findings.append(Finding(
-            kind="scrambled_text", severity=HIGH, key="scrambled_text",
+            kind="scrambled_text",
+            severity=HIGH if len(sc["scrambled"]) >= 2 else MEDIUM,
+            key="scrambled_text",
             params={"n": len(sc["scrambled"]),
                     "sample": ", ".join(dict.fromkeys(sc["scrambled"][:6]))},
             char_start=hits[0][1] if hits else None,

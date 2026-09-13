@@ -35,6 +35,15 @@ EN = {
     "passes_disagree": "the two recognition passes disagree on {n} word(s) here",
     "repetition_loop": "the same {n} words repeat over and over — the recogniser looped",
     "no_text_layer": "{n} page(s) hold no text and were not recognised",
+    "mixed_scripts": "{n} word(s) mix alphabets (for example Latin and Cyrillic letters), a sign of recognition errors: {sample}",
+    "garbled_characters": "some characters were decoded with the wrong encoding (for example “Ã©” instead of “é”)",
+    "control_characters": "the text contains invalid or invisible characters",
+    "letter_spacing": "letters are separated by spaces, as in “t h e”",
+    "duplicated_words": "{n} word(s) appear more often in the text than in the PDF, as if passages were repeated: {sample}",
+    "missing_from_text": "a passage of {n} words on this page of the PDF is missing from the text: “{sample}…”",
+    "not_in_scan": "{n} words here have no equivalent anywhere in the scanned PDF: {sample}",
+    "scan_mismatch": "the text differs from the scan almost throughout (only {pct:.0%} of it was found in the scan)",
+    "scan_unchecked": "{n} page(s) of the PDF are scans that could not be read, so the text could not be compared with them",
 
     # ---- verdicts -------------------------------------------------------
     "verdict.ok": "OK",
@@ -82,13 +91,39 @@ EN = {
     "review.findings": "What to look at",
     "review.page_of": "page {page} of {total}",
     "review.no_findings": "Nothing was flagged in this file.",
-    "review.open_folder": "Open a folder of converted files",
+    "review.no_findings_text_only": "The text checks flagged nothing — the text has not been compared with its PDF.",
+    "review.open_folder": "Open a folder of text files",
     "review.accept": "Accept",
     "review.needs_work": "Needs work",
     "review.reject": "Reject",
-    "review.reviewer": "Your name",
+    "review.reviewer": "Checked by",
     "review.note": "Note (optional)",
-    "review.saved": "Saved: {name} marked {verdict} by {who}.",
+    "review.decision_hint": "Your name and note are saved with your decision, "
+                            "so the team can see who checked each file and why. "
+                            "Your name is remembered for next time.",
+    "review.pdf_folder": "PDF folder",
+    "review.text_only": "Text checks only (no PDF)",
+    "review.triage": "Sorting the folder: {done} of {total} files read",
+    "review.checking": "Checking {name}…",
+    "review.checking_pages": "Checking {name}: page {done} of {total}",
+    "review.check_failed": "{name} could not be checked: {error}",
+    "review.local_only": "The checks and your decision for this file are saved on this computer only.",
+    "review.notice.text_only": "Text checks only: the PDF was not used.\n\n"
+                               "These checks find repeated, scrambled or garbled "
+                               "text. Without the PDF, a passage that reads well "
+                               "but is not in the source cannot be detected.",
+    "review.notice.no_pdf": "No PDF named {pdf} was found in the PDF folder or "
+                            "next to the text file.\n\n"
+                            "Only the text checks ran. Without the PDF, a passage "
+                            "that reads well but is not in the source cannot be "
+                            "detected.\n\n"
+                            "Choose the folder that contains the PDFs in "
+                            "“PDF folder” above.",
+    "review.name_required": "Enter your name in “Checked by” before recording a decision.",
+    "review.empty.no_folder": "This folder does not exist:\n{path}",
+    "review.empty.no_txt": "This folder contains no .txt files.\n\n"
+                           "Open the output folder you chose in the Convert tab.",
+    "review.saved": "Saved for {name}: {verdict} ({who}).",
     "review.nothing_loaded": "No converted files loaded yet.",
     "review.extracted": "extracted from the PDF's own text",
     "review.recognised_tesseract": "recognised from an image",
@@ -152,6 +187,15 @@ FR = {
     "passes_disagree": "les deux passes de reconnaissance divergent sur {n} mot(s) ici",
     "repetition_loop": "les mêmes {n} mots se répètent sans fin — la reconnaissance a bouclé",
     "no_text_layer": "{n} page(s) ne contiennent aucun texte et n'ont pas été reconnues",
+    "mixed_scripts": "{n} mot(s) mélangent des alphabets (par exemple des lettres latines et cyrilliques), signe d'erreurs de reconnaissance : {sample}",
+    "garbled_characters": "des caractères ont été décodés avec le mauvais encodage (par exemple « Ã© » au lieu de « é »)",
+    "control_characters": "le texte contient des caractères invalides ou invisibles",
+    "letter_spacing": "des lettres sont séparées par des espaces, comme dans « l e s »",
+    "duplicated_words": "{n} mot(s) apparaissent plus souvent dans le texte que dans le PDF, comme si des passages étaient répétés : {sample}",
+    "missing_from_text": "un passage de {n} mots de cette page du PDF manque dans le texte : « {sample}… »",
+    "not_in_scan": "{n} mots ici n'ont aucun équivalent dans le PDF numérisé : {sample}",
+    "scan_mismatch": "le texte diffère de la numérisation presque partout (seulement {pct:.0%} y a été retrouvé)",
+    "scan_unchecked": "{n} page(s) du PDF sont des numérisations illisibles pour l'outil : le texte n'a pas pu être comparé avec elles",
 
     # ---- verdicts -------------------------------------------------------
     "verdict.ok": "Correct",
@@ -200,13 +244,41 @@ FR = {
     "review.findings": "À examiner",
     "review.page_of": "page {page} sur {total}",
     "review.no_findings": "Rien n'a été signalé dans ce fichier.",
-    "review.open_folder": "Ouvrir un dossier de fichiers convertis",
+    "review.no_findings_text_only": "Les vérifications du texte n'ont rien signalé — le texte n'a pas été comparé à son PDF.",
+    "review.open_folder": "Ouvrir un dossier de fichiers texte",
     "review.accept": "Accepter",
     "review.needs_work": "À retravailler",
     "review.reject": "Rejeter",
-    "review.reviewer": "Votre nom",
+    "review.reviewer": "Vérifié par",
     "review.note": "Remarque (facultatif)",
-    "review.saved": "Enregistré : {name} marqué {verdict} par {who}.",
+    "review.decision_hint": "Votre nom et votre remarque sont enregistrés avec "
+                            "votre décision, pour que l'équipe sache qui a vérifié "
+                            "chaque fichier et pourquoi. Votre nom est retenu "
+                            "pour la prochaine fois.",
+    "review.pdf_folder": "Dossier des PDF",
+    "review.text_only": "Vérifier le texte seulement (sans PDF)",
+    "review.triage": "Tri du dossier : {done} fichiers lus sur {total}",
+    "review.checking": "Vérification de {name}…",
+    "review.checking_pages": "Vérification de {name} : page {done} sur {total}",
+    "review.check_failed": "{name} n'a pas pu être vérifié : {error}",
+    "review.local_only": "Les vérifications et votre décision pour ce fichier sont enregistrées sur cet ordinateur seulement.",
+    "review.notice.text_only": "Vérification du texte seulement : le PDF n'a pas été utilisé.\n\n"
+                               "Ces contrôles repèrent le texte répété, brouillé "
+                               "ou mal décodé. Sans le PDF, un passage qui se lit "
+                               "bien mais qui ne figure pas dans la source ne "
+                               "peut pas être détecté.",
+    "review.notice.no_pdf": "Aucun PDF nommé {pdf} n'a été trouvé dans le dossier "
+                            "des PDF ni à côté du fichier texte.\n\n"
+                            "Seules les vérifications du texte ont été faites. "
+                            "Sans le PDF, un passage qui se lit bien mais qui ne "
+                            "figure pas dans la source ne peut pas être détecté.\n\n"
+                            "Choisissez le dossier qui contient les PDF dans "
+                            "« Dossier des PDF » ci-dessus.",
+    "review.name_required": "Inscrivez votre nom dans « Vérifié par » avant d'enregistrer une décision.",
+    "review.empty.no_folder": "Ce dossier n'existe pas :\n{path}",
+    "review.empty.no_txt": "Ce dossier ne contient aucun fichier .txt.\n\n"
+                           "Ouvrez le dossier de sortie choisi dans l'onglet Convertir.",
+    "review.saved": "Enregistré pour {name} : {verdict} ({who}).",
     "review.nothing_loaded": "Aucun fichier converti n'est chargé.",
     "review.extracted": "extrait du texte même du PDF",
     "review.recognised_tesseract": "reconnu à partir d'une image",
@@ -293,6 +365,12 @@ def load_language() -> str:
     if _current not in CATALOGUES:
         _current = DEFAULT
     return _current
+
+
+def number(n: int, lang: str | None = None) -> str:
+    """21605 -> "21,605" in English, "21 605" in French."""
+    text = f"{int(n):,}"
+    return text.replace(",", "\u00a0") if (lang or _current) == "fr" else text
 
 
 def t(key: str, lang: str | None = None, **params) -> str:

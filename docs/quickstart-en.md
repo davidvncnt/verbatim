@@ -4,22 +4,21 @@ For research assistants. No programming needed.
 
 ## Once, on your machine
 
-1. Install Python 3.10 or newer from python.org.
-2. Open Terminal (macOS) or Command Prompt (Windows) and copy in this whole
-   line, then press Enter:
+The README has the full step-by-step installation, with every click spelled out. In short:
 
-   ```
-   pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"
-   ```
+1. Install Python from https://www.python.org/downloads/ — on Windows, tick
+   **Add python.exe to PATH** on the first screen.
+2. In Terminal (Mac) or Command Prompt (Windows), paste this whole line and
+   press Enter:
+   - Mac: `python3 -m pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"`
+   - Windows: `py -m pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"`
 
-   The quotation marks matter. Do **not** run `pip install verbatim` on its own:
-   that name belongs to a different, unrelated program on the Python package
-   index, and you would end up with the wrong tool.
+   Do **not** run `pip install verbatim` on its own: that name belongs to an
+   unrelated program, and you would get the wrong tool.
+3. Only for **scanned** PDFs, install Tesseract — see the README.
 
-3. Only if you will convert **scanned** PDFs, also install Tesseract:
-   - macOS: `brew install tesseract tesseract-lang`
-   - Windows: download the installer from
-     https://github.com/UB-Mannheim/tesseract/wiki, then run `pip install pytesseract`
+If `verbatim` is "not found" afterwards, use `python3 -m verbatim` (Mac) or
+`py -m verbatim` (Windows) instead.
 
 ## Every time
 
@@ -37,10 +36,15 @@ many were converted and how many need checking.
 
 ### Check
 
-The **Review** tab opens on the files that need attention, worst first.
+The **Review** tab opens on the files that need attention, worst first. It works
+on any folder of `.txt` files, including ones made by other tools: for those,
+choose the folder holding the matching PDFs in **PDF folder** (same file names),
+or tick **Text checks only (no PDF)**.
 
 - ✗ means a problem was found. **!** means something is worth a look.
-  ✓ means nothing was flagged. ☑ means you have already checked it.
+  ✓ means it was compared with its PDF and nothing was flagged. ○ means the
+  text looks fine but has not been compared with its PDF yet. ☑ means you
+  have already checked it.
 - The list at the top says what to look at, and which page.
 - Click one. The page appears on the left with the passage outlined, and the
   same passage is highlighted in the text on the right. **Compare just that
@@ -48,11 +52,13 @@ The **Review** tab opens on the files that need attention, worst first.
 - A **purple** background means those words were produced by a model rather
   than read from the PDF. Nothing in the document can confirm them, so check
   every one.
-- Type your name once, then press **Accept**, **Needs work** or **Reject**. It
+- Enter your name in **Checked by** (remembered for next time) and, if
+  useful, a **Note**. Then press **Accept**, **Needs work** or **Reject**. It
   moves to the next file on its own.
 
-Your decision is saved next to the file. It is a record of who checked what,
-and it is also what teaches the tool which files are genuinely bad.
+For files verbatim converted, your decision is saved next to the file. For any
+other file, the checks and your decision are saved **on your computer only** —
+nothing is written into the folder, and colleagues do not see those decisions.
 
 ## What the messages mean
 

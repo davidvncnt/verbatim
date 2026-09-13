@@ -78,6 +78,8 @@ def app(_window, converted):
     i18n.set_language("en")
     _window.v_lang.set(i18n.LANGUAGES["en"])
     _window.retranslate()
+    _window.review_tab.v_text_only.set(False)
+    _window.review_tab.v_pdf_folder.set("")
     _window.review_tab.load(converted)
     _window.update()
     return _window
@@ -235,3 +237,225 @@ def test_the_api_key_is_never_remembered(app, tmp_path):
     tab._remember()
     from verbatim.settings import load_prefs
     assert "sk-secret" not in str(load_prefs())
+
+
+# --- folders that cannot be reviewed -------------------------------------
+
+def test_an_empty_folder_is_explained(app, tmp_path):
+    tab = app.review_tab
+    tab.load(tmp_path)
+    app.update()
+    assert "no .txt files" in tab.text.get("1.0", "end")
+
+
+def test_loading_an_unreviewable_folder_clears_the_previous_file(app, tmp_path):
+    """Otherwise the last file's page and findings stay on screen under a
+    folder they do not belong to."""
+    tab = app.review_tab
+    assert tab.current is not None
+    tab.load(tmp_path)
+    app.update()
+    assert tab.current is None and tab.page_image is None
+    assert tab.findings.size() == 0
+
+
+# --- the decision row -----------------------------------------------------
+
+def test_the_note_field_is_labelled(app):
+    """It sat unlabelled next to the name, and nobody could tell what it was."""
+    labels = [w.cget("text") for w in app.review_tab.name_entry.master.winfo_children()
+              if w.winfo_class() == "TLabel"]
+    assert "Checked by" in labels
+    assert "Note (optional)" in labels
+
+
+def test_the_decision_row_explains_what_the_name_is_for(app):
+    labels = " ".join(w.cget("text")
+                      for w in app.review_tab.name_entry.master.winfo_children()
+                      if w.winfo_class() == "TLabel")
+    assert "who checked each file" in labels
+
+
+def test_a_decision_needs_a_name(app):
+    """A decision nobody can attribute is not worth recording."""
+    tab = app.review_tab
+    first = tab.current_txt
+    tab.v_reviewer.set("")
+    tab._decide("accepted")
+    app.update()
+    assert sidecar.read(first)["review"] is None, "saved without a name"
+    assert tab.current_txt == first, "the queue advanced without saving"
+    assert "Checked by" in tab.v_status.get()
+
+
+# --- text files verbatim did not make --------------------------------------
+
+import shutil  # noqa: E402
+import time  # noqa: E402
+
+import pdfplumber  # noqa: E402
+
+
+def wait_for(window, condition, timeout=90):
+    """Let the worker threads finish, keeping the window's event loop turning."""
+    end = time.time() + timeout
+    while time.time() < end:
+        window.update()
+        if condition():
+            return
+        time.sleep(0.05)
+    raise AssertionError("timed out waiting for the review tab")
+
+
+def old_style(pdf):
+    """Text shaped like the earlier scripts' output: hard-wrapped, headers kept."""
+    with pdfplumber.open(str(pdf)) as doc:
+        return "\n\n".join(page.extract_text() or "" for page in doc.pages)
+
+
+INVENTED = ("The Parties further agree to establish a permanent trust fund "
+            "administered jointly by the regional commissions.")
+
+
+@pytest.fixture
+def corpus(synthetic_dir, tmp_path):
+    """A folder like the real one: .txt made elsewhere, PDFs kept separately."""
+    txt, pdfs = tmp_path / "txt", tmp_path / "pdf"
+    txt.mkdir()
+    pdfs.mkdir()
+    for name in ("simple", "accents"):
+        shutil.copy(synthetic_dir / f"{name}.pdf", pdfs / f"{name}.pdf")
+    (txt / "accents.txt").write_text(old_style(synthetic_dir / "accents.pdf"),
+                                     encoding="utf-8")
+    damaged = old_style(synthetic_dir / "simple.pdf").replace(
+        "information submitted under paragraph 1 above.",
+        "information submitted under paragraph 1 above. " + INVENTED)
+    (txt / "simple.txt").write_text(damaged, encoding="utf-8")
+    loop = "the Parties shall consider the matter further at the next session " * 60
+    (txt / "looping.txt").write_text(loop, encoding="utf-8")
+    return txt, pdfs
+
+
+def open_file(window, name):
+    tab = window.review_tab
+    i = tab._row_of[name]
+    tab.queue.selection_clear(0, "end")
+    tab.queue.selection_set(i)
+    tab._file_chosen()
+    wait_for(window, lambda: tab.current is not None
+             and tab.current.get("text_file", tab.current_txt.name) == name)
+    return tab.current
+
+
+def canvas_text(tab):
+    return " ".join(tab.canvas.itemcget(i, "text") for i in tab.canvas.find_all()
+                    if tab.canvas.type(i) == "text")
+
+
+def test_every_txt_is_listed_whatever_made_it(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    app.update()
+    assert tab.queue.size() == 3
+
+
+def test_an_invented_passage_is_found_against_the_pdf(app, corpus):
+    """The failure the earlier model pipeline produced, in a file it made."""
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    record = open_file(app, "simple.txt")
+    assert record["reference"] == "text_layer"
+    invented = [f for f in record["assessment"]["findings"]
+                if f["kind"] == "invented_words"]
+    assert invented, "the invented sentence was not found"
+    assert invented[0]["page"] == 2
+    flagged = tab.current_text[invented[0]["char_start"]:invented[0]["char_end"]]
+    assert "permanent trust fund" in flagged
+    wait_for(app, lambda: tab.page_image is not None)
+    assert tab.page_number == 2
+
+
+def test_a_clean_file_from_another_tool_passes(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    record = open_file(app, "accents.txt")
+    assert record["assessment"]["verdict"] == "ok", record["assessment"]["findings"]
+
+
+def test_the_reviewed_folder_is_never_written_to(app, corpus):
+    """Checks and decisions for these files stay on this computer."""
+    txt, pdfs = corpus
+    before = sorted(p.name for p in txt.iterdir())
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.v_reviewer.set("RA1")
+    tab.load(txt)
+    open_file(app, "simple.txt")
+    tab._decide("rejected")
+    wait_for(app, lambda: not tab._checking)
+    assert sorted(p.name for p in txt.iterdir()) == before
+    assert tab.store.decision("simple.txt")["verdict"] == "rejected"
+
+
+def test_a_missing_pdf_is_explained_where_the_page_would_be(app, corpus):
+    txt, _pdfs = corpus
+    tab = app.review_tab
+    tab.load(txt)                       # no PDF folder chosen
+    record = open_file(app, "simple.txt")
+    assert record["notice"] == "no_pdf"
+    shown = canvas_text(tab)
+    assert "No PDF named simple.pdf" in shown
+    assert "cannot be detected" in shown
+
+
+def test_text_checks_only_skips_the_pdf(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    tab.v_text_only.set(True)
+    tab._options_changed()
+    wait_for(app, lambda: tab.current is not None and tab.current.get("mode") == "text_only")
+    assert tab.current["pages"] == []
+    assert "Text checks only" in canvas_text(tab)
+
+
+def test_the_folder_is_ordered_worst_first_once_read(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    wait_for(app, lambda: tab.store is not None and len(tab.store.triage()) == 3)
+    wait_for(app, lambda: "looping.txt" in tab.queue.get(0))
+    assert "✗" in tab.queue.get(0)
+
+
+def test_an_uncompared_file_is_not_ticked_as_verified(app, corpus):
+    """Passing the text checks is not the same as matching the PDF."""
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    wait_for(app, lambda: tab.store is not None and len(tab.store.triage()) == 3)
+    app.update()
+    accents = tab.entries[tab._row_of["accents.txt"]]
+    if accents.record is None:
+        assert "✓" not in tab.queue.get(tab._row_of["accents.txt"])
+
+
+def test_a_text_only_result_is_never_ticked(app, corpus):
+    """A file opened with no PDF passes its text checks. That is not a
+    verification, and the queue must not mark it as one."""
+    txt, _pdfs = corpus
+    tab = app.review_tab
+    tab.load(txt)
+    open_file(app, "accents.txt")
+    row = tab.queue.get(tab._row_of["accents.txt"])
+    assert "✓" not in row and "○" in row
+    assert "not been compared" in tab.findings.get(0)

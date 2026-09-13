@@ -131,4 +131,5 @@ def _spans_for(lines, page_no):
     place in the finished text is known; here only the geometry is available.
     """
     from .model import EXTRACTED, Span
-    return [Span(page=page_no, bbox=ln.bbox, source=EXTRACTED) for ln in lines]
+    return [Span(page=page_no, bbox=ln.bbox, source=EXTRACTED, text=ln.text)
+            for ln in lines]

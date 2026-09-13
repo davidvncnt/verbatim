@@ -58,7 +58,49 @@ def detect_language(text, candidates):
     return best, scores[best]
 
 
+# Where the usual installers put Tesseract. The Windows installer does not add
+# itself to PATH, and a program started from the Dock or Finder on macOS does
+# not see Homebrew's folder, so "not on PATH" is the common case for exactly the
+# people least able to fix PATH by hand.
+_TESSERACT_CANDIDATES = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    "/opt/homebrew/bin/tesseract",          # Homebrew, Apple silicon
+    "/usr/local/bin/tesseract",             # Homebrew, Intel
+    "/opt/local/bin/tesseract",             # MacPorts
+    "/usr/bin/tesseract",
+]
+
+
+def locate_tesseract() -> str | None:
+    """Point pytesseract at Tesseract if it is installed somewhere usual.
+
+    Returns the path used, or None. Does nothing when Tesseract is already
+    reachable on PATH, so an explicit setup is never overridden.
+    """
+    import os
+    import shutil
+    try:
+        import pytesseract
+    except ImportError:
+        return None
+    current = pytesseract.pytesseract.tesseract_cmd
+    if shutil.which(current):
+        return shutil.which(current)
+    local = os.environ.get("LOCALAPPDATA")
+    candidates = list(_TESSERACT_CANDIDATES)
+    if local:
+        candidates.insert(0, os.path.join(local, "Programs", "Tesseract-OCR",
+                                          "tesseract.exe"))
+    for path in candidates:
+        if os.path.isfile(path):
+            pytesseract.pytesseract.tesseract_cmd = path
+            return path
+    return None
+
+
 def installed_languages():
+    locate_tesseract()
     try:
         import pytesseract
         return set(pytesseract.get_languages(config="")) - {"osd"}
@@ -99,16 +141,14 @@ def needs_ocr(pd, mode) -> bool:
 def check_ocr(engine, key=""):
     """Return (usable, message). Called once before a run."""
     if engine == "tesseract":
+        locate_tesseract()
         try:
             import pytesseract
             v = pytesseract.get_tesseract_version()
             return True, f"Tesseract {v}"
         except Exception:
-            return False, ("Tesseract is not installed or not on PATH.\n"
-                           "  Windows: https://github.com/UB-Mannheim/tesseract/wiki\n"
-                           "  macOS:   brew install tesseract\n"
-                           "  Linux:   sudo apt install tesseract-ocr\n"
-                           "  then:    pip install pytesseract")
+            return False, ("Tesseract was not found. It is only needed for "
+                           "scanned PDFs; see the installation steps in the README.")
     if engine == "mistral":
         try:
             import requests  # noqa: F401

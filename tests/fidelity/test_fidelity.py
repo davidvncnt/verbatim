@@ -218,3 +218,14 @@ def test_severity_rank_orders_a_review_queue(converted):
     assert severity_rank(findings_for(res)) == 0
     damaged = res.text.replace("Decides to adopt", "Resolves to approve")
     assert severity_rank(findings_for(res, damaged)) == 3
+
+
+def test_one_scrambled_word_is_worth_a_look_two_mean_scrambled(converted):
+    """The threshold check_txt.py was calibrated to on the real corpus."""
+    res = converted["simple"]
+    one = res.text.replace("Decides", "MobIsNeDrFvaUtLio")
+    two = one.replace("Requests", "NpoOsTiItNioGn")
+    sev = lambda text: [f.severity for f in findings_for(res, text)  # noqa: E731
+                        if f.kind == "scrambled_text"]
+    assert sev(one) == ["medium"]
+    assert sev(two) == ["high"]

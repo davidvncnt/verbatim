@@ -9,4 +9,4 @@ is marked as recognised rather than extracted so that no reader, and no later
 process, can mistake the two.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

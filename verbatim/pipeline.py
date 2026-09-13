@@ -104,9 +104,15 @@ def _assign_offsets(text: str, blocks: list) -> None:
     """Give every span its character range in the finished document.
 
     Block texts survive assembly verbatim — only "\\n\\n" is inserted between
-    them — so a forward scan locates each one exactly. A block that cannot be
-    found (the blank-line collapse rewrote it) simply keeps no offsets rather
-    than being given wrong ones.
+    them — so a forward scan locates each block exactly. Inside a block, each
+    line is then found by the start of its own text: de-hyphenation changes the
+    end of the line before, never the start of the next, so a line's opening
+    characters are always present as written.
+
+    Per-line ranges matter twice over. The review window outlines the line a
+    finding sits on rather than the first line of its paragraph, and a paragraph
+    stitched across a page break can be split back onto its two pages. A line
+    that cannot be found keeps the whole block's range rather than a wrong one.
     """
     cursor = 0
     for b in blocks:
@@ -118,14 +124,20 @@ def _assign_offsets(text: str, blocks: list) -> None:
             at = text.find(body)               # tolerate a reordered block
         if at < 0:
             continue
-        cursor = at + len(body)
+        end = at + len(body)
+        cursor = end
         if not b.spans:
             b.spans = [Span(page=b.page)]
-        # One block can cover several lines on one or two pages. Without
-        # per-line offsets the honest thing is to give every span the whole
-        # block's range: the reviewer highlights the paragraph, not a word.
+        line_cursor = at
         for s in b.spans:
-            s.char_start, s.char_end = at, cursor
+            line = (s.text or "").strip()
+            found = text.find(line[:24], line_cursor, end) if line else -1
+            if found >= 0:
+                s.char_start = found
+                s.char_end = min(found + len(line), end)
+                line_cursor = found + max(1, len(line) - 2)
+            else:
+                s.char_start, s.char_end = at, end
 
 
 def convert(path: Path, args, progress=None, log=print) -> ConversionResult:

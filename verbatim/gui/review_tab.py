@@ -8,6 +8,13 @@ resource, so the tool spends it: the queue is ordered worst-first, each file
 opens on its findings, and choosing a finding jumps both panes to the passage
 and outlines it on the page image.
 
+Any folder of .txt files can be reviewed. A file verbatim converted carries its
+own record beside it. Any other file is checked when it is opened — against its
+PDF when one is found, read by Tesseract when that PDF is a scan — and what is
+learned about it is kept on this computer only, never in the folder. Checks run
+on a worker thread so a long scan never freezes the window, and choosing another
+file abandons the check in progress.
+
 Passages a model produced are shaded wherever they appear, whether or not
 anything was flagged in them. Nothing in the document can confirm those words,
 and a reviewer should never have to remember which pages those were.
@@ -15,11 +22,18 @@ and a reviewer should never have to remember which pages those were.
 
 from __future__ import annotations
 
+import queue
+import threading
+import time
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, ttk
 
 from .. import i18n, sidecar
+from ..pipeline import Stopped
+from ..qa import external
+from ..review_store import LocalStore, text_stamp
 from ..settings import load_prefs, save_prefs
 from .widgets import (
     MUTED,
@@ -27,6 +41,7 @@ from .widgets import (
     SEVERITY_FILL,
     VERDICT_COLOUR,
     Translatable,
+    hint,
     set_text,
 )
 
@@ -38,8 +53,38 @@ MIN_PANE_PX = 240
 # both have to be available.
 ZOOM_STEPS = [("fit", None), ("100%", 1.0), ("150%", 1.5), ("200%", 2.0)]
 
-VERDICT_MARK = {"ok": "✓", "review": "!", "reject": "✗",
-                "unknown": "?"}
+DECISION_LABEL = {"accepted": "review.accept", "needs_work": "review.needs_work",
+                  "rejected": "review.reject"}
+
+VERDICT_MARK = {"ok": "✓", "review": "!", "reject": "✗", "unknown": "?"}
+# Text checks found nothing, but the file has not been compared with its PDF
+# yet. A tick here would claim a verification that has not happened.
+UNCOMPARED_MARK = "○"
+RANK = {"reject": 0, "review": 1, "unknown": 2, "ok": 3}
+
+
+@dataclass
+class Entry:
+    """One .txt in the queue."""
+
+    txt: Path
+    kind: str                     # "verbatim": has its own record beside it
+    record: dict | None = None    # the full check, once there is one
+    triage: str = "unknown"       # quick text-only verdict, for ordering
+
+    @property
+    def verdict(self) -> str:
+        if self.record is not None:
+            return self.record.get("assessment", {}).get("verdict", "unknown")
+        return self.triage
+
+    @property
+    def compared(self) -> bool:
+        """Has the text been compared with its PDF? A verbatim record always
+        has been; any other file only once a full check found the PDF."""
+        if self.kind == "verbatim":
+            return True
+        return bool(self.record) and self.record.get("reference") not in (None, "none")
 
 
 class ReviewTab(ttk.Frame):
@@ -63,9 +108,27 @@ class ReviewTab(ttk.Frame):
         # re-rendered on resize and on zoom, and losing the outline at that
         # moment loses the one thing the reviewer was pointed at.
         self.current_finding: dict | None = None
-        self._pdf_missing = False
+        self.current_entry: Entry | None = None
+        self.store: LocalStore | None = None
+        self._by_name: dict = {}
+        self._row_of: dict = {}
+        self._dirty: set = set()
+
+        # Background work. `_generation` changes whenever the file being looked
+        # at changes, and a running check stops at its next page when it no
+        # longer matches. `_folder_gen` does the same for the folder triage.
+        self._jobs: queue.Queue = queue.Queue()
+        self._results: queue.Queue = queue.Queue()
+        self._generation = 0
+        self._folder_gen = 0
+        self._worker: threading.Thread | None = None
+        self._checking = False
+        self._closing = False
 
         prefs = load_prefs()
+        self.v_pdf_folder = tk.StringVar(value=prefs.get("review_pdf_folder", ""))
+        self.v_text_only = tk.BooleanVar(value=prefs.get("review_text_only", False))
+        self.v_busy = tk.StringVar()
         self.v_folder = tk.StringVar(value=prefs.get("review_folder", ""))
         self.v_reviewer = tk.StringVar(value=prefs.get("reviewer", ""))
         self.v_note = tk.StringVar()
@@ -79,6 +142,7 @@ class ReviewTab(ttk.Frame):
         self._build_panes()
         self._build_decision()
         self.tr.callback(self._refresh_queue)
+        self.after(100, self._pump)
         if self.v_folder.get():
             self.load(Path(self.v_folder.get()))
 
@@ -90,11 +154,30 @@ class ReviewTab(ttk.Frame):
         bar.columnconfigure(1, weight=1)
         btn = ttk.Button(bar, command=self._choose_folder)
         self.tr.label(btn, "review.open_folder")
-        btn.grid(row=0, column=0)
+        btn.grid(row=0, column=0, sticky="ew")
         ttk.Entry(bar, textvariable=self.v_folder).grid(row=0, column=1,
                                                         sticky="ew", padx=8)
         ttk.Label(bar, textvariable=self.v_progress,
-                  foreground=MUTED).grid(row=0, column=2)
+                  foreground=MUTED).grid(row=0, column=2, columnspan=2, sticky="e")
+
+        self.tr.label(ttk.Label(bar), "review.pdf_folder").grid(
+            row=1, column=0, sticky="e", pady=(4, 0))
+        pdf_entry = ttk.Entry(bar, textvariable=self.v_pdf_folder)
+        pdf_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=(4, 0))
+        pdf_entry.bind("<Return>", lambda _e: self._options_changed())
+        pdf_entry.bind("<FocusOut>", lambda _e: self._options_changed())
+        browse = ttk.Button(bar, command=self._choose_pdf_folder)
+        self.tr.label(browse, "button.browse")
+        browse.grid(row=1, column=2, pady=(4, 0))
+        text_only = ttk.Checkbutton(bar, variable=self.v_text_only,
+                                    command=self._options_changed)
+        self.tr.label(text_only, "review.text_only")
+        text_only.grid(row=1, column=3, padx=(10, 0), pady=(4, 0), sticky="w")
+
+        self.busy_bar = ttk.Progressbar(bar, mode="determinate", maximum=1000)
+        self.busy_bar.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(bar, textvariable=self.v_busy, foreground=MUTED).grid(
+            row=2, column=1, columnspan=3, sticky="w", padx=8, pady=(6, 0))
 
     def _build_queue(self):
         box = ttk.LabelFrame(self)
@@ -222,23 +305,43 @@ class ReviewTab(ttk.Frame):
             self.show_page(self.page_number)
 
     def _build_decision(self):
+        """Who checked it, an optional note, then the decision.
+
+        Laid out in the order it is filled in. The name is what makes the record
+        worth keeping: a decision nobody can attribute is not an audit trail.
+        """
         bar = ttk.Frame(self)
-        bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        bar.columnconfigure(5, weight=1)
+        bar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        bar.columnconfigure(3, weight=1)
+
+        self.tr.label(ttk.Label(bar), "review.reviewer").grid(
+            row=0, column=0, sticky="w", padx=(0, 4))
+        self.name_entry = ttk.Entry(bar, textvariable=self.v_reviewer, width=16)
+        self.name_entry.grid(row=0, column=1, padx=(0, 14))
+        self.tr.label(ttk.Label(bar), "review.note").grid(
+            row=0, column=2, sticky="w", padx=(0, 4))
+        ttk.Entry(bar, textvariable=self.v_note).grid(
+            row=0, column=3, sticky="ew", padx=(0, 14))
+
+        self.decision_buttons = []
         for i, (key, verdict) in enumerate((("review.accept", "accepted"),
                                             ("review.needs_work", "needs_work"),
                                             ("review.reject", "rejected"))):
             btn = ttk.Button(bar, command=lambda v=verdict: self._decide(v))
             self.tr.label(btn, key)
-            btn.grid(row=0, column=i, padx=(0, 6))
-        self.tr.label(ttk.Label(bar), "review.reviewer").grid(row=0, column=3,
-                                                              padx=(12, 4))
-        ttk.Entry(bar, textvariable=self.v_reviewer, width=14).grid(row=0, column=4)
-        ttk.Entry(bar, textvariable=self.v_note).grid(row=0, column=5, sticky="ew",
-                                                      padx=8)
+            btn.grid(row=0, column=4 + i, padx=(0, 6))
+            self.decision_buttons.append(btn)
+
+        hint(bar, "review.decision_hint", self.tr, row=1, column=0, columnspan=7,
+             sticky="w", pady=(4, 0))
         self.v_status = tk.StringVar()
         ttk.Label(self, textvariable=self.v_status, foreground=MUTED).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self._set_decision_enabled(False)
+
+    def _set_decision_enabled(self, enabled: bool):
+        for btn in self.decision_buttons:
+            btn.configure(state="normal" if enabled else "disabled")
 
     # -- loading ----------------------------------------------------------
 
@@ -248,53 +351,194 @@ class ReviewTab(ttk.Frame):
         if chosen:
             self.load(Path(chosen))
 
+    def _choose_pdf_folder(self):
+        chosen = filedialog.askdirectory(title=i18n.t("review.pdf_folder"),
+                                         initialdir=self.v_pdf_folder.get() or None)
+        if chosen:
+            self.v_pdf_folder.set(chosen)
+            self._options_changed()
+
+    def _pdf_folder(self) -> Path | None:
+        value = self.v_pdf_folder.get().strip()
+        return Path(value) if value else None
+
+    def _options_changed(self):
+        prefs = load_prefs()
+        if (prefs.get("review_pdf_folder") == self.v_pdf_folder.get().strip()
+                and prefs.get("review_text_only") == self.v_text_only.get()):
+            return
+        prefs["review_pdf_folder"] = self.v_pdf_folder.get().strip()
+        prefs["review_text_only"] = self.v_text_only.get()
+        save_prefs(prefs)
+        # The open file was checked under the old options: check it again.
+        if self.current_entry is not None and self.current_entry.kind == "external":
+            self._open(self.current_entry)
+
     def load(self, folder: Path):
-        """Read every converted file in a folder, worst first."""
+        """List every .txt in a folder, then order it worst-first.
+
+        Files verbatim converted are ordered by their own record straight away.
+        The others are ordered by a quick text-only check that runs in the
+        background and is remembered, so a folder of 21,000 files is read once,
+        not every time it is opened.
+        """
         folder = Path(folder)
         self.folder = folder
         self.v_folder.set(str(folder))
         prefs = load_prefs()
         prefs["review_folder"] = str(folder)
         save_prefs(prefs)
+        self._folder_gen += 1
+        self._generation += 1
+        self._clear_file()
+        self._busy("", None)
 
+        if not folder.is_dir():
+            self.entries = []
+            self._refresh_queue()
+            self._explain_empty(i18n.t("review.empty.no_folder", path=folder))
+            return
+
+        self.store = LocalStore(folder)
+        texts = sorted(folder.glob("*.txt"))
+        recorded = {p.name for p in folder.glob("*" + sidecar.SUFFIX)}
+        triage = self.store.triage()
         entries = []
-        for txt in sorted(folder.glob("*.txt")):
-            record = sidecar.read(txt)
-            if record:
-                entries.append((txt, record))
-        rank = {"reject": 0, "review": 1, "unknown": 2, "ok": 3}
+        for txt in texts:
+            if txt.stem + sidecar.SUFFIX in recorded:
+                record = sidecar.read(txt)
+                if record:
+                    entries.append(Entry(txt, "verbatim", record=record))
+                    continue
+            known = triage.get(txt.name)
+            verdict = (known.get("verdict", "unknown")
+                       if known and known.get("stamp") == text_stamp(txt) else "unknown")
+            entries.append(Entry(txt, "external", triage=verdict))
 
-        def key(item):
-            _txt, rec = item
-            a = rec.get("assessment", {})
-            reviewed = rec.get("review") is not None
-            return (reviewed, rank.get(a.get("verdict"), 4),
-                    -(a.get("risk_score") or 0.0))
-
-        self.entries = sorted(entries, key=key)
+        self.entries = sorted(entries, key=self._sort_key)
+        self._by_name = {e.txt.name: e for e in self.entries}
         self._refresh_queue()
-        if self.entries:
-            self.queue.selection_clear(0, "end")
-            self.queue.selection_set(0)
-            self._file_chosen()
-        else:
-            self.v_status.set(i18n.t("review.nothing_loaded"))
+        if not texts:
+            self._explain_empty(i18n.t("review.empty.no_txt"))
+            return
+        self.queue.selection_clear(0, "end")
+        self.queue.selection_set(0)
+        self._file_chosen()
+        self._start_triage()
+
+    def _decided(self, entry: Entry) -> bool:
+        if entry.kind == "verbatim":
+            return bool(entry.record and entry.record.get("review"))
+        return bool(self.store and self.store.decision(entry.txt.name))
+
+    def _sort_key(self, entry: Entry):
+        verdict = entry.verdict
+        if not entry.compared and verdict == "ok":
+            verdict = "unknown"         # not compared: not as good as verified
+        return (self._decided(entry), RANK.get(verdict, 2), entry.txt.name)
+
+    def _start_triage(self):
+        todo = [e.txt for e in self.entries
+                if e.kind == "external" and e.record is None and e.triage == "unknown"]
+        if not todo or self.store is None:
+            return
+        gen, store = self._folder_gen, self.store
+
+        def run():
+            saved = store.triage()
+            for n, txt in enumerate(todo, 1):
+                if gen != self._folder_gen or self._closing:
+                    break
+                try:
+                    verdict = external.quick_verdict(txt)["verdict"]
+                except Exception:
+                    verdict = "unknown"
+                saved[txt.name] = {"stamp": text_stamp(txt), "verdict": verdict}
+                self._results.put(("triaged", gen, txt.name, verdict, n, len(todo)))
+                if n % 500 == 0:
+                    store.save_triage(saved)
+            try:
+                store.save_triage(saved)
+            except OSError:
+                pass
+            self._results.put(("triage_done", gen))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _clear_file(self):
+        """Forget the previous file, so a new folder never shows stale pages."""
+        self.current = self.current_txt = self.current_finding = None
+        self.current_text = ""
+        self.page_image = None
+        self.canvas.delete("all")
+        self.v_page.set("")
+        self.findings.delete(0, "end")
+        set_text(self.text, "")
+        self._set_decision_enabled(False)
+
+    def _explain_empty(self, message: str):
+        """Put the explanation where the eye goes — the large text pane — and
+        not only in the status line along the bottom edge."""
+        set_text(self.text, message)
+        self.v_status.set(message.split("\n", 1)[0])
+
+    def _row(self, entry: Entry) -> tuple:
+        if self._decided(entry):
+            return f" ☑  {entry.txt.name}", MUTED
+        verdict = entry.verdict
+        if not entry.compared:
+            # Only the text was checked. Problems found that way are real, but a
+            # clean result is not a verification, so it never gets a tick.
+            if verdict in ("reject", "review"):
+                return (f" {VERDICT_MARK[verdict]}  {entry.txt.name}",
+                        VERDICT_COLOUR[verdict])
+            mark = UNCOMPARED_MARK if verdict == "ok" else "?"
+            return f" {mark}  {entry.txt.name}", MUTED
+        return (f" {VERDICT_MARK.get(verdict, '?')}  {entry.txt.name}",
+                VERDICT_COLOUR.get(verdict, MUTED))
 
     def _refresh_queue(self):
         self.queue.delete(0, "end")
+        self._row_of = {}
         done = 0
-        for txt, rec in self.entries:
-            verdict = rec.get("assessment", {}).get("verdict", "unknown")
-            reviewed = rec.get("review") is not None
-            done += reviewed
-            mark = "☑" if reviewed else VERDICT_MARK.get(verdict, "?")
-            self.queue.insert("end", f" {mark}  {txt.name}")
-            self.queue.itemconfigure(
-                self.queue.size() - 1,
-                foreground=(MUTED if reviewed
-                            else VERDICT_COLOUR.get(verdict, MUTED)))
-        self.v_progress.set(i18n.t("review.done_count", done=done,
-                                   total=len(self.entries)))
+        for i, entry in enumerate(self.entries):
+            label, colour = self._row(entry)
+            self.queue.insert("end", label)
+            self.queue.itemconfigure(i, foreground=colour)
+            self._row_of[entry.txt.name] = i
+            done += self._decided(entry)
+        self._update_count(done)
+
+    def _update_count(self, done: int | None = None):
+        if done is None:
+            done = sum(1 for e in self.entries if self._decided(e))
+        self.v_progress.set(i18n.t("review.done_count", done=i18n.number(done),
+                                   total=i18n.number(len(self.entries))))
+
+    def _update_row(self, entry: Entry):
+        i = self._row_of.get(entry.txt.name)
+        if i is None:
+            return
+        selected = i in self.queue.curselection()
+        label, colour = self._row(entry)
+        self.queue.delete(i)
+        self.queue.insert(i, label)
+        self.queue.itemconfigure(i, foreground=colour)
+        if selected:
+            self.queue.selection_set(i)
+
+    def _resort(self):
+        """Put the queue in order again, keeping the open file selected."""
+        current = self.current_entry.txt.name if self.current_entry else None
+        top = self.queue.nearest(0) if self.queue.size() else 0
+        self.entries.sort(key=self._sort_key)
+        self._refresh_queue()
+        if current in self._row_of:
+            i = self._row_of[current]
+            self.queue.selection_set(i)
+            self.queue.see(i)
+        elif self.queue.size():
+            self.queue.see(top)
 
     # -- one file ---------------------------------------------------------
 
@@ -302,23 +546,198 @@ class ReviewTab(ttk.Frame):
         sel = self.queue.curselection()
         if not sel or sel[0] >= len(self.entries):
             return
-        txt, record = self.entries[sel[0]]
-        self.current_txt, self.current = txt, record
+        self._open(self.entries[sel[0]])
+
+    def _open(self, entry: Entry):
+        self._generation += 1
+        self.current_entry = entry
+        self.current_txt, self.current = entry.txt, None
+        self.current_finding = None
+        self._set_decision_enabled(False)
         try:
-            self.current_text = txt.read_text(encoding="utf-8")
+            self.current_text = external.load_text(entry.txt)
         except OSError as exc:
             self.current_text = f"({exc})"
-        self.current_finding = None
         set_text(self.text, self.current_text)
+        self.findings.delete(0, "end")
+        self.canvas.delete("all")
+        self.page_image = None
+        self.v_page.set("")
+        self.v_note.set("")
+
+        if entry.kind == "verbatim":
+            self.v_status.set("")
+            self._busy("", None)
+            self._show_record(entry.record)
+            return
+
+        self.v_status.set(i18n.t("review.local_only"))
+        text_only = self.v_text_only.get()
+        pdf = None if text_only else external.find_pdf(entry.txt, self._pdf_folder())
+        mode = external.TEXT_ONLY if text_only else external.FULL
+        cached = None
+        if self.store is not None:
+            try:
+                cached = self.store.cached_check(
+                    entry.txt, text_sha256=external.sha256_file(entry.txt),
+                    pdf_path=pdf, pdf_stamp=external.file_stamp(pdf),
+                    mode=mode, ocr=True)
+            except OSError:
+                cached = None
+        if cached is not None:
+            entry.record = cached
+            self._update_row(entry)
+            self._busy("", None)
+            self._show_record(cached)
+            return
+
+        self.findings.insert("end", "  " + i18n.t("review.checking", name=entry.txt.name))
+        self.findings.itemconfigure(0, foreground=MUTED)
+        self._busy(i18n.t("review.checking", name=entry.txt.name), 0.0)
+        self._checking = True
+        self._ensure_worker()
+        self._jobs.put((self._generation, entry.txt, pdf, mode, self.store))
+
+    def _show_record(self, record: dict):
+        self.current = record
+        self._set_decision_enabled(True)
         self._shade_recognised()
         self._fill_findings()
-        self.v_note.set("")
-        first = record.get("assessment", {}).get("findings") or []
-        self.show_page(first[0].get("page") or 1 if first else 1)
-        if first:
+        found = record.get("assessment", {}).get("findings") or []
+        if not record.get("pages"):
+            self._show_notice(record)
+            return
+        first = found[0] if found else None
+        self.show_page((first or {}).get("page") or 1)
+        if found:
             self.findings.selection_clear(0, "end")
             self.findings.selection_set(0)
             self._finding_chosen()
+
+    def _show_notice(self, record: dict):
+        """Why there is no page to show: the explanation goes in the page pane."""
+        notice = record.get("notice")
+        if notice == "no_pdf":
+            message = i18n.t("review.notice.no_pdf",
+                             pdf=Path(record.get("text_file") or "?").stem + ".pdf")
+        else:
+            message = i18n.t("review.notice.text_only")
+        self.canvas.delete("all")
+        width = max(self.canvas.winfo_width() - 24, 260)
+        self.canvas.create_text(12, 12, anchor="nw", fill=MUTED, width=width,
+                                text=message)
+        self.v_page.set("")
+
+    # -- background work --------------------------------------------------
+
+    def _ensure_worker(self):
+        if self._worker is None or not self._worker.is_alive():
+            self._worker = threading.Thread(target=self._work_loop, daemon=True)
+            self._worker.start()
+
+    def _work_loop(self):
+        while not self._closing:
+            try:
+                job = self._jobs.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            while True:                          # only the newest request matters
+                try:
+                    job = self._jobs.get_nowait()
+                except queue.Empty:
+                    break
+            gen, txt, pdf, mode, store = job
+            if gen != self._generation:
+                continue
+
+            def progress(done, total, _note="", _gen=gen, _name=txt.name):
+                if _gen != self._generation or self._closing:
+                    raise Stopped()
+                self._results.put(("progress", _gen, _name, done, total))
+
+            try:
+                record = external.check(txt, pdf_path=pdf, mode=mode, ocr=True,
+                                         progress=progress)
+            except Stopped:
+                continue
+            except Exception as exc:
+                self._results.put(("failed", gen, txt, f"{type(exc).__name__}: {exc}"))
+                continue
+            if store is not None:
+                try:
+                    store.save_check(txt, record)
+                except OSError:
+                    pass
+                record["review"] = store.decision(txt.name)
+            self._results.put(("checked", gen, txt, record))
+
+    def _busy(self, message: str, fraction: float | None):
+        self.v_busy.set(message)
+        self.busy_bar["value"] = 0 if fraction is None else int(1000 * fraction)
+
+    def _pump(self):
+        if self._closing:
+            return
+        deadline = time.monotonic() + 0.05
+        triage_progress = None
+        resort = False
+        while time.monotonic() < deadline:
+            try:
+                msg = self._results.get_nowait()
+            except queue.Empty:
+                break
+            kind = msg[0]
+            if kind == "triaged":
+                _, gen, name, verdict, n, total = msg
+                if gen != self._folder_gen:
+                    continue
+                entry = self._by_name.get(name)
+                if entry is not None and entry.triage != verdict:
+                    entry.triage = verdict
+                    self._dirty.add(name)
+                triage_progress = (n, total)
+            elif kind == "triage_done":
+                if msg[1] == self._folder_gen:
+                    resort = True
+            elif kind == "progress":
+                _, gen, name, done, total = msg
+                if gen == self._generation and total:
+                    self._busy(i18n.t("review.checking_pages", name=name,
+                                      done=done, total=total), done / total)
+            elif kind == "checked":
+                _, gen, txt, record = msg
+                entry = self._by_name.get(txt.name)
+                if entry is not None:
+                    entry.record = record
+                    self._dirty.add(txt.name)
+                if self.current_entry is not None and txt == self.current_entry.txt:
+                    self._checking = False
+                    self._busy("", None)
+                    self._show_record(record)
+            elif kind == "failed":
+                _, gen, txt, error = msg
+                if self.current_entry is not None and txt == self.current_entry.txt:
+                    self._checking = False
+                    self._busy("", None)
+                    self.findings.delete(0, "end")
+                    self.findings.insert("end", "  " + i18n.t(
+                        "review.check_failed", name=txt.name, error=error))
+                    self.findings.itemconfigure(0, foreground=SEVERITY_COLOUR["high"])
+
+        for name in list(self._dirty)[:400]:
+            self._dirty.discard(name)
+            entry = self._by_name.get(name)
+            if entry is not None:
+                self._update_row(entry)
+        if triage_progress and not self._checking:
+            n, total = triage_progress
+            self._busy(i18n.t("review.triage", done=i18n.number(n),
+                              total=i18n.number(total)), n / total)
+        if resort:
+            if not self._checking:
+                self._busy("", None)
+            self._resort()
+        self.after(100, self._pump)
 
     def _shade_recognised(self):
         """Mark every passage that was recognised rather than extracted."""
@@ -335,7 +754,9 @@ class ReviewTab(ttk.Frame):
         self.findings.delete(0, "end")
         found = (self.current or {}).get("assessment", {}).get("findings") or []
         if not found:
-            self.findings.insert("end", "  " + i18n.t("review.no_findings"))
+            unchecked = (self.current or {}).get("reference") == "none"
+            self.findings.insert("end", "  " + i18n.t(
+                "review.no_findings_text_only" if unchecked else "review.no_findings"))
             self.findings.itemconfigure(0, foreground=MUTED)
             return
         lang = i18n.language()
@@ -373,7 +794,11 @@ class ReviewTab(ttk.Frame):
             self.current_finding = None
         highlight = highlight or self.current_finding
         pages = (self.current or {}).get("pages") or []
-        if not pages or self._rendering:
+        if self._rendering:
+            return
+        if not pages:
+            if self.current is not None:
+                self._show_notice(self.current)
             return
         number = max(1, min(int(number), len(pages)))
         self.page_number = number
@@ -426,6 +851,15 @@ class ReviewTab(ttk.Frame):
         """Draw the rectangles for this page, and pick out the flagged one."""
         spans = [s for s in (self.current or {}).get("spans", [])
                  if s["page"] == number and s.get("bbox")]
+        # A passage missing from the text has no place in the text, only on the
+        # page: its finding carries the rectangle directly.
+        if highlight and highlight.get("bbox") and highlight.get("page") == number:
+            x0, top, x1, bottom = (v * self.px_per_point for v in highlight["bbox"])
+            colour = SEVERITY_COLOUR.get(highlight.get("severity"), "#b3261e")
+            self.canvas.create_rectangle(x0 - 3, top - 3, x1 + 3, bottom + 3,
+                                         outline=colour, width=2, dash=(6, 3))
+            self.canvas.yview_moveto(
+                max(0.0, (top - 80) / max(self.page_image.height(), 1)))
         target = None
         if highlight and highlight.get("char_start") is not None:
             for s in spans:
@@ -454,26 +888,42 @@ class ReviewTab(ttk.Frame):
     # -- the decision -----------------------------------------------------
 
     def _decide(self, verdict: str):
-        if not self.current_txt:
+        entry = self.current_entry
+        if entry is None or self.current is None:
             return
-        who = self.v_reviewer.get().strip() or "unnamed"
+        who = self.v_reviewer.get().strip()
+        if not who:
+            # A decision nobody can attribute is not worth recording. The name
+            # is remembered, so this only ever asks once per person.
+            self.v_status.set(i18n.t("review.name_required"))
+            self.name_entry.focus_set()
+            return
         prefs = load_prefs()
-        prefs["reviewer"] = self.v_reviewer.get().strip()
+        prefs["reviewer"] = who
         save_prefs(prefs)
-        record = sidecar.record_review(self.current_txt, verdict=verdict,
-                                       reviewer=who, note=self.v_note.get().strip())
-        if record is None:
-            return
-        for i, (txt, _rec) in enumerate(self.entries):
-            if txt == self.current_txt:
-                self.entries[i] = (txt, record)
-                break
-        self.current = record
-        self.v_status.set(i18n.t("review.saved", name=self.current_txt.name,
-                                 verdict=verdict, who=who))
-        index = self.queue.curselection()
-        self._refresh_queue()
-        nxt = (index[0] + 1) if index else 0
+        note = self.v_note.get().strip()
+
+        if entry.kind == "verbatim":
+            record = sidecar.record_review(entry.txt, verdict=verdict,
+                                           reviewer=who, note=note)
+            if record is None:
+                return
+            entry.record = record
+        else:
+            decision = self.store.record_decision(
+                entry.txt.name, verdict=verdict, reviewer=who, note=note,
+                tool_said=self.current.get("assessment", {}).get("verdict"))
+            self.current["review"] = decision
+            entry.record = self.current
+        self.current = entry.record
+
+        self.v_status.set(i18n.t("review.saved", name=entry.txt.name,
+                                 verdict=i18n.t(DECISION_LABEL[verdict]),
+                                 who=who))
+        index = self._row_of.get(entry.txt.name, 0)
+        self._update_row(entry)
+        self._update_count()
+        nxt = index + 1
         if nxt < len(self.entries):
             self.queue.selection_clear(0, "end")
             self.queue.selection_set(nxt)
@@ -482,6 +932,9 @@ class ReviewTab(ttk.Frame):
 
     def cancel_pending(self):
         """Drop scheduled work before the widgets go away."""
+        self._closing = True
+        self._generation += 1
+        self._folder_gen += 1
         if self._resize_job is not None:
             try:
                 self.after_cancel(self._resize_job)
@@ -491,6 +944,11 @@ class ReviewTab(ttk.Frame):
 
     def retranslate(self):
         self.tr.refresh()
+        self._update_count()
+        if self.current and not self.current.get("pages"):
+            self._fill_findings()
+            self._show_notice(self.current)
+            return
         if self.current:
             self._fill_findings()
             self.v_page.set(i18n.t("review.page_of", page=self.page_number,

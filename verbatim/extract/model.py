@@ -33,6 +33,9 @@ class Span:
     char_end: int = 0
     bbox: tuple | None = None      # (x0, top, x1, bottom) in PDF points
     source: str = EXTRACTED
+    # The line's own text, used only while the document is assembled to find
+    # where the line sits inside its paragraph. Not written to the record.
+    text: str = field(default="", repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

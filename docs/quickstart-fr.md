@@ -4,24 +4,21 @@ Pour les auxiliaires de recherche. Aucune programmation requise.
 
 ## Une seule fois, sur votre poste
 
-1. Installez Python 3.10 ou plus récent depuis python.org.
-2. Ouvrez le Terminal (macOS) ou l'Invite de commandes (Windows), copiez-y
-   cette ligne entière, puis appuyez sur Entrée :
+Le README décrit l'installation pas à pas, clic par clic. En bref :
 
-   ```
-   pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"
-   ```
+1. Installez Python depuis https://www.python.org/downloads/ — sous Windows,
+   cochez **Add python.exe to PATH** sur le premier écran.
+2. Dans le Terminal (Mac) ou l'Invite de commandes (Windows), collez cette
+   ligne entière et appuyez sur Entrée :
+   - Mac : `python3 -m pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"`
+   - Windows : `py -m pip install "verbatim[all] @ https://github.com/davidvncnt/verbatim/archive/refs/heads/main.zip"`
 
-   Les guillemets sont nécessaires. Ne lancez **pas** `pip install verbatim`
-   seul : ce nom appartient à un autre programme, sans rapport, sur l'index des
-   paquets Python, et vous installeriez le mauvais outil.
+   Ne lancez **pas** `pip install verbatim` seul : ce nom appartient à un autre
+   logiciel, sans rapport, et vous installeriez le mauvais outil.
+3. Seulement pour les PDF **numérisés**, installez Tesseract — voir le README.
 
-3. Seulement si vous convertirez des PDF **numérisés**, installez aussi
-   Tesseract :
-   - macOS : `brew install tesseract tesseract-lang`
-   - Windows : téléchargez l'installateur sur
-     https://github.com/UB-Mannheim/tesseract/wiki, puis lancez
-     `pip install pytesseract`
+Si `verbatim` est ensuite « introuvable », utilisez `python3 -m verbatim` (Mac)
+ou `py -m verbatim` (Windows) à la place.
 
 ## À chaque utilisation
 
@@ -40,22 +37,29 @@ combien ont été convertis et combien sont à vérifier.
 ### Vérifier
 
 L'onglet **Vérifier** s'ouvre sur les fichiers à examiner, les plus douteux en
-premier.
+premier. Il fonctionne avec n'importe quel dossier de fichiers `.txt`, y compris
+ceux produits par d'autres outils : choisissez alors le dossier contenant les PDF
+correspondants dans **Dossier des PDF** (mêmes noms de fichiers), ou cochez
+**Vérifier le texte seulement (sans PDF)**.
 
 - ✗ signale un problème. **!** signale quelque chose à regarder.
-  ✓ signifie que rien n'a été relevé. ☑ signifie que vous l'avez déjà vérifié.
+  ✓ signifie : comparé au PDF, rien à signaler. ○ signifie que le texte semble
+  correct mais n'a pas encore été comparé à son PDF. ☑ signifie que vous l'avez
+  déjà vérifié.
 - La liste du haut indique quoi examiner, et à quelle page.
 - Cliquez sur une ligne. La page s'affiche à gauche, le passage entouré, et le
   même passage est surligné dans le texte à droite. **Comparez seulement ce
   paragraphe** : inutile de lire tout le fichier.
 - Un fond **mauve** signale des mots produits par un modèle plutôt que lus dans
   le PDF. Rien dans le document ne peut les confirmer : vérifiez-les tous.
-- Inscrivez votre nom une fois, puis cliquez sur **Accepter**, **À retravailler**
-  ou **Rejeter**. Le fichier suivant s'ouvre automatiquement.
+- Inscrivez votre nom dans **Vérifié par** (il est retenu) et, si utile, une
+  **Remarque**. Cliquez ensuite sur **Accepter**, **À retravailler** ou
+  **Rejeter**. Le fichier suivant s'ouvre automatiquement.
 
-Votre décision est enregistrée à côté du fichier. Elle constitue la trace de qui
-a vérifié quoi, et elle sert aussi à apprendre à l'outil quels fichiers sont
-réellement mauvais.
+Pour les fichiers convertis par verbatim, votre décision est enregistrée à côté
+du fichier. Pour les autres, les vérifications et votre décision sont
+enregistrées **sur votre ordinateur seulement** : rien n'est écrit dans le
+dossier, et vos collègues ne voient pas ces décisions.
 
 ## Ce que signalent les messages
 
