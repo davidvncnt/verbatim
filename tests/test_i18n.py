@@ -22,8 +22,11 @@ def test_both_catalogues_hold_the_same_keys():
 def test_every_finding_key_is_translated():
     """The keys the quality layer can actually emit, found in its own source
     rather than listed by hand, so a new finding cannot be forgotten."""
-    src = (fidelity.__file__.replace(".pyc", ".py"))
-    emitted = set(re.findall(r'key="([a-z_]+)"', open(src, encoding="utf-8").read()))
+    from pathlib import Path
+    qa_dir = Path(fidelity.__file__).parent
+    source = " ".join(p.read_text(encoding="utf-8") for p in qa_dir.glob("*.py"))
+    emitted = set(re.findall(r'key="([a-z_]+)"', source))
+    emitted |= set(re.findall(r'_passage\([^)]*"([a-z_]+)"', source))
     assert emitted, "no finding keys found — has the pattern changed?"
     for key in emitted:
         for lang in i18n.CATALOGUES:
@@ -37,7 +40,7 @@ def test_every_string_formats_without_error(lang):
     sample = {"n": 3, "sample": "a, b", "pct": 0.87, "pages": 4, "tables": 1,
               "dropped": 2, "done": 5, "total": 9, "name": "f.txt", "path": "/tmp",
               "note": "x", "error": "boom", "who": "RA1", "verdict": "ok",
-              "page": 2, "version": "5.4.0", "flagged": 2}
+              "page": 2, "version": "5.4.0", "flagged": 2, "pdf": "x.pdf"}
     for key in i18n.CATALOGUES[lang]:
         out = i18n.t(key, lang, **sample)
         assert "{" not in out, f"{lang}:{key} left an unfilled placeholder: {out}"

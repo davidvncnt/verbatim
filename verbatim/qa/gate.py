@@ -121,20 +121,12 @@ class QualityGate:
                 page=result.stats["scanned"][0]))
 
         # --- intrinsic trip-wires, which fire without a baseline ------------
-        labels = {
-            "top_ngram_coverage": "repetition_loop",
-            "tail_ngram_coverage": "repetition_loop",
-        }
-        tripped = []
-        for key, limit in self.config["HARD_LIMITS"].items():
-            val = metrics.get(key)
-            if val is not None and float(val) > limit:
-                tripped.append(key)
-                if key in labels:
-                    findings.append(Finding(
-                        kind=labels[key], severity=HIGH, key="repetition_loop",
-                        params={"n": self.config["REPEAT_NGRAM_N"]},
-                        detail=f"{key}={float(val):.3g} > {limit}"))
+        # Every tripped limit produces a located finding. Previously four of
+        # them rejected the file without adding one, so the reviewer saw a
+        # verdict of "problem found" and nothing to look at.
+        from .intrinsic import intrinsic_findings
+        text_findings, _, tripped = intrinsic_findings(text, self.config, metrics)
+        findings += [f for f in text_findings if f.kind != "scrambled_text"]
 
         # --- relative score, when a corpus baseline exists ------------------
         score = None

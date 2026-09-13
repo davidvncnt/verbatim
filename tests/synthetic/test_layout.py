@@ -218,8 +218,10 @@ def test_every_block_can_be_located_in_the_pdf(out):
             assert b.spans, f"{name}: a paragraph carries no provenance"
             for s in b.spans:
                 assert s.char_end > s.char_start, f"{name}: empty character range"
-                assert res.text[s.char_start:s.char_end] == b.text.strip(), (
-                    f"{name}: span does not point at the block's own text")
+                # By content, not by position: a heading repeated on every page
+                # has several identical copies, and find() only sees the first.
+                assert res.text[s.char_start:s.char_end] in b.text, (
+                    f"{name}: span does not point inside its own paragraph")
                 assert 1 <= s.page <= res.stats["pages"], f"{name}: bad page number"
                 assert s.source == "extracted", f"{name}: wrong provenance label"
 
@@ -230,3 +232,15 @@ def test_a_stitched_paragraph_reports_both_its_pages(out):
               if b.kind == "para" and "entry into force of" in b.text]
     assert len(joined) == 1
     assert {s.page for s in joined[0].spans} == {1, 2}
+
+
+def test_each_line_has_its_own_range(out):
+    """So the reviewer outlines the line a finding is on, not the first line
+    of its paragraph."""
+    joined = [b for b in out["simple"].blocks
+              if b.kind == "para" and "entry into force of" in b.text][0]
+    ranges = [(s.char_start, s.char_end) for s in joined.spans]
+    assert len(set(ranges)) == len(ranges), "lines share a range"
+    text = out["simple"].text
+    first_on_page_2 = [s for s in joined.spans if s.page == 2][0]
+    assert text[first_on_page_2.char_start:].startswith("the amendment")
