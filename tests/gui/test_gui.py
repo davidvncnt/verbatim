@@ -292,6 +292,7 @@ def test_a_decision_needs_a_name(app):
 
 import shutil  # noqa: E402
 import time  # noqa: E402
+from tkinter import ttk  # noqa: E402
 
 import pdfplumber  # noqa: E402
 
@@ -459,3 +460,134 @@ def test_a_text_only_result_is_never_ticked(app, corpus):
     row = tab.queue.get(tab._row_of["accents.txt"])
     assert "✓" not in row and "○" in row
     assert "not been compared" in tab.findings.get(0)
+
+
+# --- sorting by kind of problem, and seeing decisions ---------------------
+
+def test_the_queue_can_be_filtered_by_kind_of_problem(app, corpus):
+    """Judging forty files with the same defect is far quicker than forty
+    unrelated ones."""
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    wait_for(app, lambda: tab.store is not None and len(tab.store.triage()) == 3)
+    wait_for(app, lambda: "repetition_loop" in
+             {k for e in tab.entries for k in e.problems})
+
+    kinds = tab._filter_kinds
+    assert "repetition_loop" in kinds
+    tab.filter_box.current(kinds.index("repetition_loop") + 1)
+    tab._filter_chosen()
+    app.update()
+    assert [e.txt.name for e in tab.shown] == ["looping.txt"]
+    assert tab.queue.size() == 1
+
+    tab.filter_box.current(0)            # back to everything
+    tab._filter_chosen()
+    app.update()
+    assert tab.queue.size() == 3
+
+
+def test_the_filter_names_kinds_in_plain_language(app, corpus):
+    txt, _pdfs = corpus
+    tab = app.review_tab
+    tab.load(txt)
+    wait_for(app, lambda: "Repetition loop" in " ".join(tab.filter_box.cget("values")))
+    labels = " ".join(tab.filter_box.cget("values"))
+    assert "Repetition loop" in labels
+    assert "repetition_loop" not in labels, "a raw code reached the window"
+
+
+def test_the_queue_shows_which_way_a_file_was_decided(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.v_reviewer.set("RA1")
+    tab.load(txt)
+    open_file(app, "simple.txt")
+    tab._decide("rejected")
+    wait_for(app, lambda: not tab._checking)
+    assert "☒" in tab.queue.get(tab._row_of["simple.txt"])
+    open_file(app, "accents.txt")
+    tab._decide("accepted")
+    wait_for(app, lambda: not tab._checking)
+    assert "☑" in tab.queue.get(tab._row_of["accents.txt"])
+
+
+def test_the_summary_reports_what_was_decided(app, corpus, monkeypatch):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.v_reviewer.set("RA1")
+    tab.load(txt)
+    open_file(app, "simple.txt")
+    tab._decide("rejected")
+    wait_for(app, lambda: not tab._checking)
+
+    tab._show_summary()
+    app.update()
+    windows = [w for w in tab.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert windows, "the summary did not open"
+    body = [w for w in windows[-1].winfo_children() if isinstance(w, ttk.Frame)]
+    shown = " ".join(t.get("1.0", "end") for frame in body
+                     for t in frame.winfo_children() if isinstance(t, tk.Text))
+    assert "3 text file(s)" in shown
+    assert "1 checked by a person, 2 still to check" in shown
+    assert "Rejected" in shown and "RA1" in shown
+    windows[-1].destroy()
+
+
+# --- display of other scripts ---------------------------------------------
+
+def test_a_document_in_another_script_gets_a_font_that_holds_it(app, corpus, tmp_path):
+    """Tk otherwise searches font by font for every character, which costs
+    about a second per page of Arabic — sixty times the same Latin text."""
+    txt, _pdfs = corpus
+    arabic = ("مؤتمر الأطراف، إذ يشير إلى المقرر بشأن المبادئ التوجيهية لإعداد "
+              "البلاغات الوطنية، يقرر اعتماد المبادئ التوجيهية المرفقة. " * 20)
+    (txt / "arabic.txt").write_text(arabic, encoding="utf-8")
+    tab = app.review_tab
+    tab.load(txt)
+    default = tab.text.cget("font")
+    open_file(app, "arabic.txt")
+    if tab._complex_font():              # only if such a font is installed
+        assert tab.text.cget("font") != default
+    open_file(app, "accents.txt")
+    assert tab.text.cget("font") == default, "the Latin default was not restored"
+
+
+def test_the_scan_confidence_threshold_can_be_changed_in_the_window(app, corpus):
+    """How sure the recogniser must be before its reading counts as evidence
+    depends on the scans, so it belongs in the window, not in a settings file."""
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    open_file(app, "simple.txt")
+    assert tab._conf_fraction() == pytest.approx(0.70), "the default moved"
+
+    tab.v_conf.set(40)
+    tab._options_changed()
+    wait_for(app, lambda: tab.current is not None
+             and tab.current.get("crosscheck_conf") == pytest.approx(0.40))
+    from verbatim.settings import load_prefs
+    assert load_prefs()["review_crosscheck_conf"] == 40, "not remembered"
+
+
+def test_changing_the_threshold_does_not_reuse_the_old_answer(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.v_conf.set(70)
+    tab.load(txt)
+    open_file(app, "simple.txt")
+    cached = tab.store.cached_check(
+        txt / "simple.txt",
+        text_sha256=__import__("verbatim.qa.external", fromlist=["x"]).sha256_file(
+            txt / "simple.txt"),
+        pdf_path=pdfs / "simple.pdf",
+        pdf_stamp=__import__("verbatim.qa.external", fromlist=["x"]).file_stamp(
+            pdfs / "simple.pdf"),
+        mode="full", ocr=True, crosscheck_conf=0.40)
+    assert cached is None, "a check made at another threshold was reused"

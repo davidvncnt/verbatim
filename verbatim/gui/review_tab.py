@@ -26,13 +26,14 @@ import queue
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, ttk
 
 from .. import i18n, sidecar
 from ..pipeline import Stopped
 from ..qa import external
+from ..qa.config import CONFIG
 from ..review_store import LocalStore, text_stamp
 from ..settings import load_prefs, save_prefs
 from .widgets import (
@@ -42,6 +43,7 @@ from .widgets import (
     VERDICT_COLOUR,
     Translatable,
     hint,
+    scrolled_text,
     set_text,
 )
 
@@ -62,6 +64,17 @@ VERDICT_MARK = {"ok": "✓", "review": "!", "reject": "✗", "unknown": "?"}
 UNCOMPARED_MARK = "○"
 RANK = {"reject": 0, "review": 1, "unknown": 2, "ok": 3}
 
+DECISION_MARK = {"accepted": ("☑", "#1b6b2f"), "needs_work": ("⊙", "#8a5a00"),
+                 "rejected": ("☒", "#b3261e")}
+
+# Scripts whose letters most fixed-width fonts do not carry. Tk then falls back
+# font by font, character by character, which costs about a second for a page of
+# Arabic — sixty times the same amount of Latin text. Naming a font that holds
+# the letters avoids the search entirely.
+COMPLEX_SCRIPTS = {"ARABIC", "HEBREW", "SYRIAC", "THAANA", "NKO", "DEVANAGARI"}
+COMPLEX_FONTS = ("Geeza Pro", "Arial Unicode MS", "Noto Naskh Arabic",
+                 "Segoe UI", "Tahoma")
+
 
 @dataclass
 class Entry:
@@ -71,12 +84,22 @@ class Entry:
     kind: str                     # "verbatim": has its own record beside it
     record: dict | None = None    # the full check, once there is one
     triage: str = "unknown"       # quick text-only verdict, for ordering
+    kinds: list = field(default_factory=list)   # kinds of problem found
 
     @property
     def verdict(self) -> str:
         if self.record is not None:
             return self.record.get("assessment", {}).get("verdict", "unknown")
         return self.triage
+
+    @property
+    def problems(self) -> list:
+        """Kinds of problem found, from the full check when there is one."""
+        if self.record is not None:
+            return sorted({f.get("kind", "")
+                           for f in self.record.get("assessment", {}).get("findings", [])
+                           if f.get("kind")})
+        return list(self.kinds)
 
     @property
     def compared(self) -> bool:
@@ -112,6 +135,7 @@ class ReviewTab(ttk.Frame):
         self.store: LocalStore | None = None
         self._by_name: dict = {}
         self._row_of: dict = {}
+        self.shown: list = []
         self._dirty: set = set()
 
         # Background work. `_generation` changes whenever the file being looked
@@ -128,6 +152,8 @@ class ReviewTab(ttk.Frame):
         prefs = load_prefs()
         self.v_pdf_folder = tk.StringVar(value=prefs.get("review_pdf_folder", ""))
         self.v_text_only = tk.BooleanVar(value=prefs.get("review_text_only", False))
+        self.v_conf = tk.IntVar(value=int(prefs.get(
+            "review_crosscheck_conf", CONFIG["CROSSCHECK_CONF_MIN"] * 100)))
         self.v_busy = tk.StringVar()
         self.v_folder = tk.StringVar(value=prefs.get("review_folder", ""))
         self.v_reviewer = tk.StringVar(value=prefs.get("reviewer", ""))
@@ -158,7 +184,10 @@ class ReviewTab(ttk.Frame):
         ttk.Entry(bar, textvariable=self.v_folder).grid(row=0, column=1,
                                                         sticky="ew", padx=8)
         ttk.Label(bar, textvariable=self.v_progress,
-                  foreground=MUTED).grid(row=0, column=2, columnspan=2, sticky="e")
+                  foreground=MUTED).grid(row=0, column=2, sticky="e", padx=(8, 4))
+        summary = ttk.Button(bar, command=self._show_summary)
+        self.tr.label(summary, "review.summary")
+        summary.grid(row=0, column=3, sticky="e")
 
         self.tr.label(ttk.Label(bar), "review.pdf_folder").grid(
             row=1, column=0, sticky="e", pady=(4, 0))
@@ -174,23 +203,74 @@ class ReviewTab(ttk.Frame):
         self.tr.label(text_only, "review.text_only")
         text_only.grid(row=1, column=3, padx=(10, 0), pady=(4, 0), sticky="w")
 
+        # How sure the recogniser must be before its reading of a scan counts
+        # as evidence. The right value depends on the scans, so it is here
+        # rather than buried in a settings file.
+        conf = ttk.Frame(bar)
+        conf.grid(row=2, column=3, padx=(10, 0), pady=(6, 0), sticky="w")
+        self.tr.label(ttk.Label(conf), "review.confidence").pack(side="left")
+        spin = ttk.Spinbox(conf, from_=0, to=100, increment=5, width=5,
+                           textvariable=self.v_conf, command=self._options_changed)
+        spin.pack(side="left", padx=(4, 2))
+        spin.bind("<Return>", lambda _e: self._options_changed())
+        spin.bind("<FocusOut>", lambda _e: self._options_changed())
+        ttk.Label(conf, text="%").pack(side="left")
+
         self.busy_bar = ttk.Progressbar(bar, mode="determinate", maximum=1000)
         self.busy_bar.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         ttk.Label(bar, textvariable=self.v_busy, foreground=MUTED).grid(
-            row=2, column=1, columnspan=3, sticky="w", padx=8, pady=(6, 0))
+            row=2, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 0))
 
     def _build_queue(self):
         box = ttk.LabelFrame(self)
         self.tr.label(box, "review.queue")
         box.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        box.rowconfigure(0, weight=1)
+        box.rowconfigure(1, weight=1)
+        box.columnconfigure(0, weight=1)
+
+        # Show one kind of problem at a time: a reviewer who has worked out how
+        # to judge garbled encoding gets through forty of them far faster than
+        # forty unrelated files.
+        top = ttk.Frame(box)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(2, 4))
+        top.columnconfigure(1, weight=1)
+        self.tr.label(ttk.Label(top), "review.filter").grid(row=0, column=0,
+                                                            sticky="w")
+        self.filter_box = ttk.Combobox(top, state="readonly", width=20)
+        self.filter_box.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.filter_box.bind("<<ComboboxSelected>>", self._filter_chosen)
+        self._filter_kind = ""
+        self._filter_kinds: list = []
+
         self.queue = tk.Listbox(box, width=24, exportselection=False,
                                 activestyle="none")
-        self.queue.grid(row=0, column=0, sticky="nsew")
+        self.queue.grid(row=1, column=0, sticky="nsew")
         bar = ttk.Scrollbar(box, command=self.queue.yview)
-        bar.grid(row=0, column=1, sticky="ns")
+        bar.grid(row=1, column=1, sticky="ns")
         self.queue.configure(yscrollcommand=bar.set)
         self.queue.bind("<<ListboxSelect>>", self._file_chosen)
+
+    def _refresh_filter_choices(self):
+        kinds = sorted({k for e in self.entries for k in e.problems})
+        self._filter_kinds = kinds
+        labels = [i18n.t("review.filter.all")] + [
+            f"{i18n.t('kind.' + k)} ({sum(1 for e in self.entries if k in e.problems)})"
+            for k in kinds]
+        self.filter_box.configure(values=labels)
+        if self._filter_kind in kinds:
+            self.filter_box.current(kinds.index(self._filter_kind) + 1)
+        else:
+            self._filter_kind = ""
+            self.filter_box.current(0)
+
+    def _filter_chosen(self, _event=None):
+        index = self.filter_box.current()
+        self._filter_kind = "" if index <= 0 else self._filter_kinds[index - 1]
+        self._refresh_queue()
+        if self.shown:
+            self.queue.selection_clear(0, "end")
+            self.queue.selection_set(0)
+            self._file_chosen()
 
     def _build_panes(self):
         right = ttk.Frame(self)
@@ -236,6 +316,7 @@ class ReviewTab(ttk.Frame):
         # at the right edge is worse than no page at all, because the reviewer
         # cannot tell whether the missing part is where the problem is.
         self.canvas.bind("<Configure>", self._canvas_resized)
+        self._bind_panning(self.canvas)
         cbar = ttk.Scrollbar(left, command=self.canvas.yview)
         cbar.grid(row=1, column=1, sticky="ns")
         hbar = ttk.Scrollbar(left, orient="horizontal", command=self.canvas.xview)
@@ -248,6 +329,7 @@ class ReviewTab(ttk.Frame):
         textframe.columnconfigure(0, weight=1)
         self.text = tk.Text(textframe, wrap="word", state="disabled",
                             borderwidth=1, relief="solid", padx=6, pady=6)
+        self._default_font = self.text.cget("font")
         self.text.grid(row=0, column=0, sticky="nsew")
         tbar = ttk.Scrollbar(textframe, command=self.text.yview)
         tbar.grid(row=0, column=1, sticky="ns")
@@ -271,6 +353,43 @@ class ReviewTab(ttk.Frame):
         # on a timer instead reads winfo_width() before the window is mapped,
         # gets 1, and silently leaves the page in a sliver.
         panes.bind("<Configure>", self._place_sash)
+
+    def _bind_panning(self, canvas):
+        """Move around the page with the trackpad, and by dragging it.
+
+        Scrollbars alone make a zoomed page tiring to read: every comparison
+        with the text costs two drags on a thin target. Two fingers scroll,
+        held sideways they scroll sideways, and the page can be dragged
+        directly, which works with a mouse too.
+        """
+        def scroll(event, axis="y"):
+            if event.delta:
+                step = -1 if event.delta > 0 else 1
+                amount = max(1, int(abs(event.delta) / 6)) if abs(event.delta) > 6 else 1
+            else:                                    # X11 sends buttons 4 and 5
+                step = -1 if event.num == 4 else 1
+                amount = 1
+            getattr(canvas, f"{axis}view_scroll")(step * amount, "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", scroll)
+        canvas.bind("<Shift-MouseWheel>", lambda e: scroll(e, "x"))
+        canvas.bind("<Button-4>", scroll)
+        canvas.bind("<Button-5>", scroll)
+
+        def grab(event):
+            canvas.scan_mark(event.x, event.y)
+            canvas.configure(cursor="fleur")
+
+        def drag(event):
+            canvas.scan_dragto(event.x, event.y, gain=1)
+
+        def release(_event):
+            canvas.configure(cursor="")
+
+        canvas.bind("<ButtonPress-1>", grab)
+        canvas.bind("<B1-Motion>", drag)
+        canvas.bind("<ButtonRelease-1>", release)
 
     def _place_sash(self, _event=None):
         if self._sash_placed:
@@ -358,17 +477,26 @@ class ReviewTab(ttk.Frame):
             self.v_pdf_folder.set(chosen)
             self._options_changed()
 
+    def _conf_fraction(self) -> float:
+        try:
+            return max(0, min(100, int(self.v_conf.get()))) / 100.0
+        except (TypeError, ValueError, tk.TclError):
+            return CONFIG["CROSSCHECK_CONF_MIN"]
+
     def _pdf_folder(self) -> Path | None:
         value = self.v_pdf_folder.get().strip()
         return Path(value) if value else None
 
     def _options_changed(self):
         prefs = load_prefs()
+        conf = max(0, min(100, int(self.v_conf.get() or 0)))
         if (prefs.get("review_pdf_folder") == self.v_pdf_folder.get().strip()
-                and prefs.get("review_text_only") == self.v_text_only.get()):
+                and prefs.get("review_text_only") == self.v_text_only.get()
+                and prefs.get("review_crosscheck_conf") == conf):
             return
         prefs["review_pdf_folder"] = self.v_pdf_folder.get().strip()
         prefs["review_text_only"] = self.v_text_only.get()
+        prefs["review_crosscheck_conf"] = conf
         save_prefs(prefs)
         # The open file was checked under the old options: check it again.
         if self.current_entry is not None and self.current_entry.kind == "external":
@@ -411,12 +539,16 @@ class ReviewTab(ttk.Frame):
                     entries.append(Entry(txt, "verbatim", record=record))
                     continue
             known = triage.get(txt.name)
-            verdict = (known.get("verdict", "unknown")
-                       if known and known.get("stamp") == text_stamp(txt) else "unknown")
-            entries.append(Entry(txt, "external", triage=verdict))
+            fresh = known and known.get("stamp") == text_stamp(txt)
+            entries.append(Entry(
+                txt, "external",
+                triage=known.get("verdict", "unknown") if fresh else "unknown",
+                kinds=list(known.get("kinds", [])) if fresh else []))
 
         self.entries = sorted(entries, key=self._sort_key)
         self._by_name = {e.txt.name: e for e in self.entries}
+        self._filter_kind = ""
+        self._refresh_filter_choices()
         self._refresh_queue()
         if not texts:
             self._explain_empty(i18n.t("review.empty.no_txt"))
@@ -450,11 +582,19 @@ class ReviewTab(ttk.Frame):
                 if gen != self._folder_gen or self._closing:
                     break
                 try:
-                    verdict = external.quick_verdict(txt)["verdict"]
+                    quick = external.quick_verdict(txt)
                 except Exception:
-                    verdict = "unknown"
-                saved[txt.name] = {"stamp": text_stamp(txt), "verdict": verdict}
-                self._results.put(("triaged", gen, txt.name, verdict, n, len(todo)))
+                    quick = {"verdict": "unknown", "kinds": []}
+                saved[txt.name] = {"stamp": text_stamp(txt),
+                                   "verdict": quick["verdict"],
+                                   "kinds": quick.get("kinds", [])}
+                self._results.put(("triaged", gen, txt.name, quick["verdict"],
+                                   quick.get("kinds", []), n, len(todo)))
+                if n % 25 == 0:
+                    # Hand the processor back for a moment: this loop competes
+                    # with the window for it, and a folder of several thousand
+                    # files takes minutes.
+                    time.sleep(0.002)
                 if n % 500 == 0:
                     store.save_triage(saved)
             try:
@@ -482,9 +622,18 @@ class ReviewTab(ttk.Frame):
         set_text(self.text, message)
         self.v_status.set(message.split("\n", 1)[0])
 
+    def _decision_of(self, entry: Entry) -> dict | None:
+        if entry.kind == "verbatim":
+            return (entry.record or {}).get("review")
+        return self.store.decision(entry.txt.name) if self.store else None
+
     def _row(self, entry: Entry) -> tuple:
-        if self._decided(entry):
-            return f" ☑  {entry.txt.name}", MUTED
+        decision = self._decision_of(entry)
+        if decision:
+            # Which way it was decided, not merely that it was: the queue is
+            # where a reviewer looks back over what they concluded.
+            mark, colour = DECISION_MARK.get(decision.get("verdict"), ("☑", MUTED))
+            return f" {mark}  {entry.txt.name}", colour
         verdict = entry.verdict
         if not entry.compared:
             # Only the text was checked. Problems found that way are real, but a
@@ -500,14 +649,14 @@ class ReviewTab(ttk.Frame):
     def _refresh_queue(self):
         self.queue.delete(0, "end")
         self._row_of = {}
-        done = 0
-        for i, entry in enumerate(self.entries):
+        self.shown = [e for e in self.entries
+                      if not self._filter_kind or self._filter_kind in e.problems]
+        for i, entry in enumerate(self.shown):
             label, colour = self._row(entry)
             self.queue.insert("end", label)
             self.queue.itemconfigure(i, foreground=colour)
             self._row_of[entry.txt.name] = i
-            done += self._decided(entry)
-        self._update_count(done)
+        self._update_count()
 
     def _update_count(self, done: int | None = None):
         if done is None:
@@ -532,6 +681,7 @@ class ReviewTab(ttk.Frame):
         current = self.current_entry.txt.name if self.current_entry else None
         top = self.queue.nearest(0) if self.queue.size() else 0
         self.entries.sort(key=self._sort_key)
+        self._refresh_filter_choices()
         self._refresh_queue()
         if current in self._row_of:
             i = self._row_of[current]
@@ -544,9 +694,9 @@ class ReviewTab(ttk.Frame):
 
     def _file_chosen(self, _event=None):
         sel = self.queue.curselection()
-        if not sel or sel[0] >= len(self.entries):
+        if not sel or sel[0] >= len(self.shown):
             return
-        self._open(self.entries[sel[0]])
+        self._open(self.shown[sel[0]])
 
     def _open(self, entry: Entry):
         self._generation += 1
@@ -558,6 +708,7 @@ class ReviewTab(ttk.Frame):
             self.current_text = external.load_text(entry.txt)
         except OSError as exc:
             self.current_text = f"({exc})"
+        self._apply_font(self.current_text)
         set_text(self.text, self.current_text)
         self.findings.delete(0, "end")
         self.canvas.delete("all")
@@ -581,7 +732,8 @@ class ReviewTab(ttk.Frame):
                 cached = self.store.cached_check(
                     entry.txt, text_sha256=external.sha256_file(entry.txt),
                     pdf_path=pdf, pdf_stamp=external.file_stamp(pdf),
-                    mode=mode, ocr=True)
+                    mode=mode, ocr=True,
+                    crosscheck_conf=self._conf_fraction())
             except OSError:
                 cached = None
         if cached is not None:
@@ -596,7 +748,8 @@ class ReviewTab(ttk.Frame):
         self._busy(i18n.t("review.checking", name=entry.txt.name), 0.0)
         self._checking = True
         self._ensure_worker()
-        self._jobs.put((self._generation, entry.txt, pdf, mode, self.store))
+        self._jobs.put((self._generation, entry.txt, pdf, mode, self.store,
+                        self._conf_fraction()))
 
     def _show_record(self, record: dict):
         self.current = record
@@ -646,7 +799,7 @@ class ReviewTab(ttk.Frame):
                     job = self._jobs.get_nowait()
                 except queue.Empty:
                     break
-            gen, txt, pdf, mode, store = job
+            gen, txt, pdf, mode, store, conf = job
             if gen != self._generation:
                 continue
 
@@ -657,7 +810,7 @@ class ReviewTab(ttk.Frame):
 
             try:
                 record = external.check(txt, pdf_path=pdf, mode=mode, ocr=True,
-                                         progress=progress)
+                                         progress=progress, crosscheck_conf=conf)
             except Stopped:
                 continue
             except Exception as exc:
@@ -688,13 +841,15 @@ class ReviewTab(ttk.Frame):
                 break
             kind = msg[0]
             if kind == "triaged":
-                _, gen, name, verdict, n, total = msg
+                _, gen, name, verdict, kinds, n, total = msg
                 if gen != self._folder_gen:
                     continue
                 entry = self._by_name.get(name)
-                if entry is not None and entry.triage != verdict:
-                    entry.triage = verdict
-                    self._dirty.add(name)
+                if entry is not None:
+                    entry.kinds = kinds
+                    if entry.triage != verdict:
+                        entry.triage = verdict
+                        self._dirty.add(name)
                 triage_progress = (n, total)
             elif kind == "triage_done":
                 if msg[1] == self._folder_gen:
@@ -738,6 +893,31 @@ class ReviewTab(ttk.Frame):
                 self._busy("", None)
             self._resort()
         self.after(100, self._pump)
+
+    def _complex_font(self) -> str | None:
+        """A font on this machine that carries the letters of complex scripts."""
+        if not hasattr(self, "_complex_font_cached"):
+            from tkinter import font as tkfont
+            families = set(tkfont.families(self))
+            self._complex_font_cached = next(
+                (f for f in COMPLEX_FONTS if f in families), None)
+        return self._complex_font_cached
+
+    def _apply_font(self, text: str):
+        """Fixed width for ordinary text, so rendered tables line up; a font
+        that holds the letters when the document is in a complex script, where
+        legibility and speed both matter more than column alignment."""
+        from ..qa.textmetrics import char_script
+        sample = text[:4000]
+        complex_chars = sum(1 for c in sample
+                            if c.isalpha() and char_script(c) in COMPLEX_SCRIPTS)
+        letters = sum(1 for c in sample if c.isalpha())
+        wanted = self._default_font
+        if letters and complex_chars > 0.05 * letters:
+            family = self._complex_font()
+            if family:
+                wanted = (family, 12)
+        self.text.configure(font=wanted)
 
     def _shade_recognised(self):
         """Mark every passage that was recognised rather than extracted."""
@@ -924,11 +1104,89 @@ class ReviewTab(ttk.Frame):
         self._update_row(entry)
         self._update_count()
         nxt = index + 1
-        if nxt < len(self.entries):
+        if nxt < len(self.shown):
             self.queue.selection_clear(0, "end")
             self.queue.selection_set(nxt)
             self.queue.see(nxt)
             self._file_chosen()
+
+    # -- the summary ------------------------------------------------------
+
+    def _show_summary(self):
+        """What came of this folder: read-only, and exportable.
+
+        The decisions exist in the records already; the point here is that
+        nobody should have to open two hundred of them to see what the team
+        concluded.
+        """
+        from tkinter import filedialog as fd
+
+        from ..summary import collect, counts, write_csv
+        if self.folder is None:
+            return
+        rows = collect(self.folder, self.store)
+        totals = counts(rows)
+
+        window = tk.Toplevel(self)
+        window.title(i18n.t("summary.title"))
+        window.geometry("560x560")
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        ttk.Label(window, text=i18n.t("summary.folder", path=self.folder),
+                  foreground=MUTED, wraplength=520).grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 6))
+
+        frame, body = scrolled_text(window)
+        frame.grid(row=1, column=0, sticky="nsew", padx=12)
+
+        lines = [i18n.t("summary.files", n=i18n.number(totals["files"])),
+                 i18n.t("summary.decided", done=i18n.number(totals["decided"]),
+                        left=i18n.number(totals["undecided"])), ""]
+        if not totals["decided"]:
+            lines.append(i18n.t("summary.none"))
+            lines.append("")
+
+        def section(title_key, counter, label=lambda k: k):
+            if not counter:
+                return
+            lines.append(i18n.t(title_key))
+            for key, n in counter.most_common():
+                lines.append(f"    {i18n.number(n):>7}   {label(key)}")
+            lines.append("")
+
+        section("summary.by_decision", totals["by_decision"],
+                lambda k: i18n.t("decided." + k))
+        section("summary.by_verdict", totals["by_verdict"],
+                lambda k: i18n.t("verdict." + k) if k in VERDICT_MARK else k)
+        section("summary.by_problem", totals["by_problem"],
+                lambda k: i18n.t("kind." + k))
+        section("summary.reviewers", totals["reviewers"])
+        if totals["overruled"]:
+            lines.append(i18n.t("summary.overruled",
+                                n=i18n.number(totals["overruled"])))
+        set_text(body, "\n".join(lines))
+
+        status = tk.StringVar()
+        ttk.Label(window, textvariable=status, foreground=MUTED,
+                  wraplength=520).grid(row=2, column=0, sticky="w", padx=12,
+                                       pady=(6, 0))
+        buttons = ttk.Frame(window)
+        buttons.grid(row=3, column=0, sticky="ew", padx=12, pady=12)
+        buttons.columnconfigure(0, weight=1)
+
+        def export():
+            path = fd.asksaveasfilename(
+                parent=window, defaultextension=".csv",
+                initialfile=f"{self.folder.name}-verification.csv",
+                filetypes=[("CSV", "*.csv")])
+            if path:
+                write_csv(rows, Path(path))
+                status.set(i18n.t("summary.exported", path=path))
+
+        ttk.Button(buttons, text=i18n.t("summary.export"), command=export).grid(
+            row=0, column=0, sticky="w")
+        ttk.Button(buttons, text=i18n.t("summary.close"),
+                   command=window.destroy).grid(row=0, column=1, sticky="e")
 
     def cancel_pending(self):
         """Drop scheduled work before the widgets go away."""

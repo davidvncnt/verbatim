@@ -89,7 +89,8 @@ class LocalStore:
         return self.dir / "checks" / f"{name}.json"
 
     def cached_check(self, txt: Path, *, text_sha256: str, pdf_path: Path | None,
-                     pdf_stamp: str | None, mode: str, ocr: bool) -> dict | None:
+                     pdf_stamp: str | None, mode: str, ocr: bool,
+                     crosscheck_conf: float | None = None) -> dict | None:
         """The saved check, if nothing it depended on has changed since."""
         record = _read_json(self._check_path(Path(txt).name), None)
         if not record:
@@ -101,11 +102,22 @@ class LocalStore:
                 and record.get("check_revision") == _revision()
                 and record.get("source_path") == (str(Path(pdf_path).resolve())
                                                   if pdf_path else None)
-                and record.get("pdf_stamp") == pdf_stamp)
+                and record.get("pdf_stamp") == pdf_stamp
+                and (crosscheck_conf is None
+                     or record.get("crosscheck_conf") == round(float(crosscheck_conf), 4)))
         if not same:
             return None
         record["review"] = self.decision(Path(txt).name)
         return record
+
+    def any_check(self, name: str) -> dict | None:
+        """The saved check whether or not it is still current.
+
+        For the summary, which reports what was decided and why rather than
+        re-deciding anything: a check made before the file was edited is still
+        the check the reviewer was looking at when they decided.
+        """
+        return _read_json(self._check_path(name), None)
 
     def save_check(self, txt: Path, record: dict) -> None:
         self._touch_folder_note()

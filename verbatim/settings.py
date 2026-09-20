@@ -36,8 +36,10 @@ OCR = "auto"            # "auto"   = recognise only pages with no text layer
                         # "off"    = never, leave those pages empty
                         # "always" = send EVERY page to OCR, even pages that
                         #            already have selectable text
-OCR_ENGINE = "tesseract"   # "tesseract" = free, local, needs Tesseract
-                           # "mistral"   = paid API, better on poor scans
+# Conversion uses Mistral. Tesseract is still built in, but only as the
+# independent reading Review compares a model's output against: on anything
+# short of a clean scan its own output is too poor to convert with.
+OCR_ENGINE = "mistral"
 OCR_LANGUAGE = "auto"   # "auto" picks per file from OCR_LANGUAGES, or "fra"...
 OCR_LANGUAGES = "eng,fra,spa"
 OCR_DPI = 300

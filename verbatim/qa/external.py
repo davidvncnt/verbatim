@@ -50,12 +50,13 @@ from .fidelity import (
 )
 from .intrinsic import intrinsic_findings
 from .locate import Reference, line_spans, page_of, uncovered_runs
+from .textmetrics import compute_text_metrics
 
 FULL, TEXT_ONLY = "full", "text_only"
 
 # Raised whenever what the checks report changes, so results remembered from
 # an earlier version are redone instead of being shown as current.
-CHECK_REVISION = 1
+CHECK_REVISION = 2
 REF_TEXT_LAYER, REF_RECOGNISED, REF_NONE = "text_layer", "recognised", "none"
 
 # Markers earlier scripts wrote into their output. Blanked — never removed — so
@@ -332,9 +333,17 @@ def recognised_findings(text: str, ref: Reference, removed: str,
 
 def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
           ocr: bool = True, progress=None, profile: str = "decisions",
-          config: dict | None = None) -> dict:
-    """Check one text file. Returns a record shaped like a sidecar record."""
+          config: dict | None = None, crosscheck_conf: float | None = None) -> dict:
+    """Check one text file. Returns a record shaped like a sidecar record.
+
+    `crosscheck_conf` is how sure the recogniser must be before its reading of
+    a scan is treated as evidence. It is adjustable because the right value
+    depends on the scans: too high and a usable comparison is thrown away, too
+    low and a bad reading produces false alarms.
+    """
     cfg = config or CONFIG
+    conf_min = cfg["CROSSCHECK_CONF_MIN"] if crosscheck_conf is None \
+        else float(crosscheck_conf)
     txt_path = Path(txt_path)
     text = load_text(txt_path)
     findings, _metrics, _ = intrinsic_findings(text, cfg)
@@ -350,7 +359,7 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
     else:
         from ..pipeline import convert
         from ..settings import Settings
-        settings = Settings(ocr="off", profile=profile)
+        settings = Settings(ocr="off", profile=profile, ocr_engine="tesseract")
         if ocr:
             from ..ocr.detect import check_ocr, resolve_languages
             usable, _note = check_ocr("tesseract")
@@ -364,7 +373,22 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
         usable_ref = alnum_count(res.text) >= 0.2 * max(alnum_count(text), 1)
         unread = res.stats.get("scanned") or []
 
-        if not usable_ref or (unread and not recognised):
+        confs = [p["ocr_conf"] for p in pages if p.get("ocr_conf")]
+        mean_conf = sum(confs) / len(confs) if confs else None
+        # Recognition that produced little, or that the recogniser itself had
+        # no confidence in, is not evidence. Comparing against it would report
+        # every paragraph as missing, and a reviewer shown a hundred false
+        # alarms stops reading the real ones.
+        poor_reading = mean_conf is not None and (
+            mean_conf < conf_min or not usable_ref)
+
+        if recognised and poor_reading:
+            reference = REF_NONE
+            notice = "scan_unreadable"
+            findings.append(Finding(
+                kind="scan_unchecked", severity=MEDIUM, key="scan_unreadable",
+                params={"pct": mean_conf}))
+        elif not usable_ref or (unread and not recognised):
             reference = REF_NONE
             notice = "scan_unchecked"
             findings.append(Finding(
@@ -376,12 +400,10 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
             if recognised:
                 reference = REF_RECOGNISED
                 found = recognised_findings(text, ref, res.dropped_text, pages)
-                confs = [p["ocr_conf"] for p in pages if p.get("ocr_conf")]
-                if confs and sum(confs) / len(confs) < cfg["OCR_CONF_MIN"]:
+                if mean_conf is not None and mean_conf < cfg["OCR_CONF_MIN"]:
                     found.append(Finding(
                         kind="ocr_confidence", severity=MEDIUM,
-                        key="ocr_low_confidence",
-                        params={"pct": sum(confs) / len(confs)}))
+                        key="ocr_low_confidence", params={"pct": mean_conf}))
             else:
                 reference = REF_TEXT_LAYER
                 found = exact_findings(text, res.raw_text, res.dropped_text, ref)
@@ -398,6 +420,12 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
             conf = page_conf.get(f.page)
             if conf is not None and conf < cfg["OCR_CONF_MIN"]:
                 f.severity = MEDIUM
+
+    # Where the words cannot be checked against a text layer, ask whether they
+    # belong in this material at all. Against a text layer the exact comparison
+    # already answers that, precisely.
+    if reference != REF_TEXT_LAYER:
+        findings += lexical_findings(text)
 
     order = {HIGH: 0, MEDIUM: 1, LOW: 2}
     findings.sort(key=lambda f: (order.get(f.severity, 3),
@@ -418,6 +446,7 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
         "pdf_stamp": file_stamp(pdf_path),
         "mode": mode,
         "ocr": bool(ocr),
+        "crosscheck_conf": round(conf_min, 4),
         "reference": reference,
         "notice": notice,
         "assessment": {"verdict": verdict, "risk_score": None,
@@ -428,11 +457,34 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
     }
 
 
+def lexical_findings(text: str, vocabulary=None) -> list:
+    """Words this material would not be expected to contain."""
+    from .lexicon import MAX_REPORTED, MIN_SUSPICIOUS, locate, suspicious_words
+    words = suspicious_words(text, vocabulary)
+    if len(words) < MIN_SUSPICIOUS:
+        return []
+    start, end = locate(text, set(words))
+    return [Finding(kind="unexpected_words", severity=MEDIUM,
+                    key="unexpected_words",
+                    params={"n": len(words),
+                            "sample": ", ".join(words[:MAX_REPORTED])},
+                    char_start=start, char_end=end,
+                    detail=" ".join(words[:50]))]
+
+
 def quick_verdict(txt_path: Path, config: dict | None = None) -> dict:
-    """Text-only triage for ordering a folder before any file is opened."""
+    """Text-only triage for ordering a folder before any file is opened.
+
+    Runs on every file of a folder, so it skips language detection: it costs
+    about half the time of everything else here and none of these checks
+    depend on it. Over 21,000 files that is minutes of a reviewer's wait, and
+    of the processor time the window needs to stay responsive.
+    """
+    cfg = config or CONFIG
     text = load_text(txt_path)
-    findings, _, _ = intrinsic_findings(text, config or CONFIG)
+    metrics = compute_text_metrics(text, config=cfg, language="unknown")
+    findings, _, _ = intrinsic_findings(text, cfg, metrics)
     severities = {f.severity for f in findings}
     return {"verdict": "reject" if HIGH in severities else
                        ("review" if findings else "ok"),
-            "findings": len(findings)}
+            "kinds": sorted({f.kind for f in findings})}

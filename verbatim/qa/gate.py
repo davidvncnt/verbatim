@@ -107,6 +107,10 @@ class QualityGate:
                 kind="model_pages", severity=HIGH, key="model_pages",
                 params={"n": len(model_pages)},
                 page=model_pages[0].number))
+        if model_pages:
+            from .external import lexical_findings
+            findings += lexical_findings(text)
+
         confs = [p.ocr_conf for p in recognised if p.ocr_conf is not None]
         if confs:
             mean_conf = sum(confs) / len(confs)

@@ -29,7 +29,6 @@ from .settings import (
     OCR,
     OCR_DESKEW,
     OCR_DPI,
-    OCR_ENGINE,
     OCR_LANGUAGE,
     OCR_LANGUAGES,
     OCR_MIN_CONF,
@@ -47,7 +46,8 @@ from .settings import (
     Settings,
 )
 
-SUBCOMMANDS = ("convert", "check", "review", "audit", "gui")
+SUBCOMMANDS = ("convert", "check", "review", "summary", "vocabulary",
+               "audit", "gui")
 
 
 # argparse cannot tell a default from a value that happens to equal it, so the
@@ -97,8 +97,6 @@ def add_conversion_options(ap):
     ap.add_argument("--y-tol", type=float, default=3.0)
     ap.add_argument("--ocr", choices=["auto", "off", "always"], default=OCR,
                     help="recognise text on pages that have none")
-    ap.add_argument("--ocr-engine", choices=["tesseract", "mistral"],
-                    default=OCR_ENGINE)
     ap.add_argument("--ocr-language", default=OCR_LANGUAGE,
                     help='"auto", or a Tesseract code such as fra / eng+fra')
     ap.add_argument("--ocr-languages", default=OCR_LANGUAGES)
@@ -148,6 +146,21 @@ def make_parser():
 
     rev = sub.add_parser("review", help="open the review window on a folder")
     rev.add_argument("folder", nargs="?", type=Path, default=None)
+
+    summ = sub.add_parser("summary", help="what came of a reviewed folder")
+    summ.add_argument("folder", type=Path)
+    summ.add_argument("--csv", type=Path, default=None,
+                      help="also write one row per file to this CSV")
+
+    vocab = sub.add_parser(
+        "vocabulary",
+        help="learn which words belong in this material, from text you trust")
+    vocab.add_argument("folder", type=Path, help="folder of accepted .txt files")
+    vocab.add_argument("--min-documents", type=int, default=1,
+                       help="how many documents a word must appear in to count "
+                            "as expected (default 1: a larger vocabulary flags "
+                            "less, and not crying wolf matters more here)")
+    vocab.add_argument("--out", type=Path, default=None)
 
     aud = sub.add_parser("audit", help="profile a corpus and write a baseline")
     aud.add_argument("folder", type=Path, help="folder of .txt files")
@@ -270,6 +283,56 @@ def cmd_review(args) -> int:
     return run(review_folder=args.folder, language=getattr(args, "lang", None))
 
 
+def cmd_summary(args) -> int:
+    from .summary import collect, counts, write_csv
+    folder = Path(args.folder)
+    if not folder.is_dir():
+        print(i18n.t("review.empty.no_folder", path=folder), file=sys.stderr)
+        return 2
+    rows = collect(folder)
+    if not rows:
+        print(i18n.t("review.empty.no_txt"), file=sys.stderr)
+        return 2
+    totals = counts(rows)
+    print(i18n.t("summary.folder", path=folder))
+    print(i18n.t("summary.files", n=i18n.number(totals["files"])))
+    print(i18n.t("summary.decided", done=i18n.number(totals["decided"]),
+                 left=i18n.number(totals["undecided"])))
+
+    def section(title_key, counter, label=lambda k: k):
+        if not counter:
+            return
+        print("\n" + i18n.t(title_key))
+        for key, n in counter.most_common():
+            print(f"    {i18n.number(n):>7}   {label(key)}")
+
+    section("summary.by_decision", totals["by_decision"],
+            lambda k: i18n.t("decided." + k))
+    section("summary.by_verdict", totals["by_verdict"],
+            lambda k: i18n.t("verdict." + k))
+    section("summary.by_problem", totals["by_problem"], lambda k: i18n.t("kind." + k))
+    section("summary.reviewers", totals["reviewers"])
+    if totals["overruled"]:
+        print("\n" + i18n.t("summary.overruled", n=i18n.number(totals["overruled"])))
+    if args.csv:
+        write_csv(rows, args.csv)
+        print("\n" + i18n.t("summary.exported", path=args.csv))
+    return 0
+
+
+def cmd_vocabulary(args) -> int:
+    from .qa.lexicon import build
+    folder = Path(args.folder)
+    if not folder.is_dir():
+        print(i18n.t("review.empty.no_folder", path=folder), file=sys.stderr)
+        return 2
+    build(folder, min_documents=args.min_documents, out=args.out)
+    print("Text checked against this vocabulary is flagged when it contains "
+          "words this material would not be expected to hold. It is a reason "
+          "to look, never a verdict.")
+    return 0
+
+
 def cmd_audit(args) -> int:
     from .qa.audit import run_audit
     return run_audit(args.folder, pdf_dir=args.pdf_dir, out=args.out,
@@ -295,7 +358,9 @@ def main(argv=None) -> int:
         i18n.set_language(args.lang)
 
     handler = {"convert": cmd_convert, "check": cmd_check, "review": cmd_review,
-               "audit": cmd_audit, "gui": cmd_gui}.get(args.command)
+               "summary": cmd_summary, "vocabulary": cmd_vocabulary,
+               "audit": cmd_audit,
+               "gui": cmd_gui}.get(args.command)
     if handler is None:
         return cmd_gui(args)
     try:
