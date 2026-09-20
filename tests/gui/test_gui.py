@@ -591,3 +591,13 @@ def test_changing_the_threshold_does_not_reuse_the_old_answer(app, corpus):
             pdfs / "simple.pdf"),
         mode="full", ocr=True, crosscheck_conf=0.40)
     assert cached is None, "a check made at another threshold was reused"
+
+
+def test_the_window_has_its_own_icon(app):
+    """A window with an icon is easier to find among a dozen others. It must
+    never be a reason the application fails to open, so this only checks that
+    an icon was loaded where one could be."""
+    from pathlib import Path as _Path
+    assets = _Path(app.review_tab.__module__ and "verbatim/assets")
+    assert (assets / "icon.png").is_file() and (assets / "icon.ico").is_file()
+    assert getattr(app, "_icon", None) is not None

@@ -50,6 +50,9 @@ Homepage = "https://github.com/davidvncnt/verbatim"
 [tool.setuptools.packages.find]
 include = ["verbatim*"]
 
+[tool.setuptools.package-data]
+verbatim = ["assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

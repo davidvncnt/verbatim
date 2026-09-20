@@ -4,6 +4,22 @@ verbatim convertit les PDF de textes d'accords environnementaux internationaux
 et de décisions des COP en texte brut propre et fidèle, puis aide à vérifier le
 résultat.
 
+## Aperçu
+
+![L'onglet Convertir de verbatim : les champs pour le dossier des PDF et le dossier de sortie, les options de reconnaissance et de mise en page, et le journal de la conversion.](docs/images/convert.png)
+
+*Convertir : on choisit le dossier des PDF, celui des textes à produire, le
+format de sortie, puis on lance. Le journal rend compte de chaque fichier.*
+
+![L'onglet Vérifier de verbatim : la liste des fichiers à gauche avec leur verdict, le problème à examiner en haut, la page du PDF au centre et le texte extrait à droite.](docs/images/review.png)
+
+*Vérifier : le problème à examiner en haut, la page du PDF à gauche, le texte à
+droite. Ici, verbatim signale que les trois pages ont été produites par un
+modèle et non extraites ; les passages concernés sont teintés dans le texte. À
+gauche, chaque fichier porte son verdict et, une fois jugé, la décision prise.*
+
+L'interface existe en français et en anglais ; ces captures sont en anglais.
+
 ## À quoi sert verbatim
 
 **Convertir des PDF en texte.** Vous choisissez un dossier de PDF, verbatim
@@ -166,11 +182,114 @@ verbatim --version
 
 La réponse doit être `verbatim` suivi d'un numéro de version.
 
-Si vous obtenez plutôt *command not found* ou *n'est pas reconnu*, utilisez à
-la place, ici et partout ailleurs :
+### Si une commande n'est pas reconnue
+
+C'est le problème le plus courant, et il vient toujours de la même chose : le
+système ne sait pas *où* chercher le programme. Cette liste d'emplacements
+s'appelle le **PATH**.
+
+**Le plus simple : ne pas dépendre du PATH.** Ces deux commandes fonctionnent
+même quand `verbatim` n'est pas reconnu, parce qu'elles passent par Python :
 
 - sur Mac : `python3 -m verbatim`
 - sur Windows : `py -m verbatim`
+
+Utilisez-les partout où ce README écrit `verbatim`. Par exemple
+`py -m verbatim summary mon_dossier`. Rien d'autre à configurer.
+
+#### Windows : « python n'est pas reconnu »
+
+La case **Add python.exe to PATH** n'a pas été cochée pendant l'installation.
+Deux solutions :
+
+- Utilisez `py` au lieu de `python` : `py -m pip …`, `py -m verbatim`. Le
+  lanceur `py` est installé de toute façon, indépendamment du PATH. C'est la
+  solution la plus sûre.
+- Ou relancez l'installateur Python, choisissez **Modify**, puis **Next**, et
+  cochez **Add Python to environment variables**. Fermez et rouvrez l'Invite de
+  commandes ensuite : une fenêtre déjà ouverte garde l'ancien PATH.
+
+#### Windows : « verbatim n'est pas reconnu » alors que Python fonctionne
+
+`pip` a installé la commande dans un dossier `Scripts` qui n'est pas dans le
+PATH. Pour l'ajouter :
+
+1. Affichez le dossier concerné :
+
+   ```
+   py -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+   ```
+
+   Si le résultat ne contient pas `verbatim.exe`, essayez celui des
+   installations « pour l'utilisateur seulement » :
+
+   ```
+   py -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))"
+   ```
+
+2. Copiez ce chemin.
+3. Menu Démarrer → tapez `variables d'environnement` → **Modifier les variables
+   d'environnement pour votre compte**.
+4. Sélectionnez la ligne **Path**, cliquez sur **Modifier**, puis **Nouveau**,
+   collez le chemin, et validez par **OK** dans chaque fenêtre.
+5. Fermez l'Invite de commandes et rouvrez-la.
+
+#### Mac : « command not found: verbatim »
+
+Même cause. Affichez le dossier :
+
+```
+python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+```
+
+Puis ajoutez-le au PATH, en remplaçant `LE_CHEMIN` par ce qui s'est affiché :
+
+```
+echo 'export PATH="$PATH:LE_CHEMIN"' >> ~/.zprofile
+```
+
+Fermez et rouvrez le Terminal.
+
+### Créer un raccourci pour ouvrir verbatim
+
+Pour éviter de taper une commande à chaque fois.
+
+**Sur Windows.**
+
+1. Affichez l'emplacement de l'icône :
+
+   ```
+   py -c "import verbatim, pathlib; print(pathlib.Path(verbatim.__file__).parent / 'assets' / 'icon.ico')"
+   ```
+
+2. Clic droit sur le Bureau → **Nouveau** → **Raccourci**.
+3. Comme emplacement, entrez `pyw -m verbatim` (avec `pyw`, et non `py` : la
+   fenêtre noire de l'Invite de commandes ne s'ouvre pas). Si Windows refuse
+   cet emplacement, entrez `py -m verbatim` : le raccourci fonctionnera, avec
+   une fenêtre noire en plus.
+4. Nommez-le `verbatim`.
+5. Clic droit sur le raccourci → **Propriétés** → **Changer d'icône** →
+   **Parcourir** → collez le chemin affiché à l'étape 1.
+
+**Sur Mac.**
+
+1. Ouvrez l'application **Éditeur de script**, collez :
+
+   ```
+   do shell script "nohup python3 -m verbatim > /dev/null 2>&1 &"
+   ```
+
+2. **Fichier** → **Exporter**, format **Application**, enregistrez-la dans
+   Applications sous le nom `verbatim`.
+3. Pour l'icône : affichez son emplacement avec
+
+   ```
+   python3 -c "import verbatim, pathlib; print(pathlib.Path(verbatim.__file__).parent / 'assets' / 'icon.png')"
+   ```
+
+   ouvrez ce fichier dans Aperçu, **Édition** → **Tout sélectionner**, puis
+   **Copier**. Clic droit sur l'application → **Lire les informations**,
+   cliquez sur la petite icône en haut à gauche de la fenêtre, et collez.
 
 ### Mettre à jour verbatim
 

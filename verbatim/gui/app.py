@@ -38,6 +38,7 @@ class App(tk.Tk):
         self.title(i18n.t("app.title"))
 
         self.baseline_path = self._find_baseline()
+        self._set_icon()
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -53,6 +54,23 @@ class App(tk.Tk):
         if review_folder:
             self.load_review(Path(review_folder))
             self.tabs.select(self.review_tab)
+
+    def _set_icon(self):
+        """Give the window its own icon where the platform allows it.
+
+        On Windows this is what the taskbar button shows. On macOS the Dock
+        icon belongs to the interpreter that is running, so it stays the Python
+        rocket until the application is packaged as a bundle; setting it here
+        is harmless there, and a shortcut can carry the icon instead.
+        """
+        assets = Path(__file__).resolve().parent.parent / "assets"
+        try:
+            if sys.platform.startswith("win"):
+                self.iconbitmap(default=str(assets / "icon.ico"))
+            self._icon = tk.PhotoImage(file=str(assets / "icon.png"))
+            self.iconphoto(True, self._icon)
+        except Exception:
+            pass            # an icon is never a reason to fail to open
 
     # -- header ------------------------------------------------------------
 
