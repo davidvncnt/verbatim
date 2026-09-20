@@ -88,6 +88,43 @@ def _longest_letter_run(text: str) -> tuple:
     return (at, at + len(snippet)) if at >= 0 else (None, None)
 
 
+# A presence/absence matrix — ticks, crosses, dashes, Y/N — is an ordinary
+# shape in these documents and must not be mistaken for a degenerate one.
+_MARKERS = set("✔✓✗✘xX×—–-•■□▪○●+*·.oO0YyNn│┃|‖§\ufe0f")
+_TABULAR_LINE = re.compile(r" \| |^-+\+-|^\s*\||\t.*\t|\S {2,}\S.* {2,}\S")
+_CELL_SPLIT = re.compile(r"\s*\|\s*|\t+|\s{2,}")
+
+
+def degenerate_table(text: str, min_cells: int = 12, share: float = 0.6):
+    """A table whose cells are nearly all the same value.
+
+    What a model does when asked to read a table it cannot see: it keeps the
+    shape and fills every cell with the same token. Measured over the corpus,
+    this fires on 3 documents in 21,605 once marker tables are excluded, and
+    catches a table whose cells were all filled with "1".
+
+    Returns (value, share of cells, character offset) or None.
+    """
+    rows = [ln for ln in text.splitlines() if _TABULAR_LINE.search(ln)]
+    if len(rows) < 3:
+        return None
+    cells = [c.strip() for ln in rows for c in _CELL_SPLIT.split(ln.strip()) if c.strip()]
+    if len(cells) < min_cells:
+        return None
+    short = [c for c in cells if len(c) <= 3 and not set(c) <= _MARKERS]
+    if not short:
+        return None
+    value, n = Counter(short).most_common(1)[0]
+    if n < share * len(cells):
+        return None
+    for line in rows:
+        if line.count(value) >= 2:
+            at = text.find(line)
+            if at >= 0:
+                return value, n / len(cells), at
+    return value, n / len(cells), None
+
+
 def intrinsic_findings(text: str, config: dict | None = None,
                        metrics: dict | None = None) -> tuple:
     """(findings, metrics, tripped limit names) for one text."""
@@ -139,6 +176,14 @@ def intrinsic_findings(text: str, config: dict | None = None,
         findings.append(Finding(
             kind="letter_spacing", severity=MEDIUM, key="letter_spacing",
             char_start=a, char_end=b))
+
+    table = degenerate_table(text)
+    if table:
+        value, share, at = table
+        findings.append(Finding(
+            kind="degenerate_table", severity=MEDIUM, key="degenerate_table",
+            params={"value": value, "pct": share},
+            char_start=at, char_end=(at + 80) if at is not None else None))
 
     sc = scramble_scan(text)
     if sc["scrambled"]:

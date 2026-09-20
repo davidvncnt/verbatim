@@ -38,7 +38,7 @@ class ConvertTab(ttk.Frame):
         self.v_out = tk.StringVar(value=prefs.get("output_folder", ""))
         self.v_rec = tk.BooleanVar(value=prefs.get("recursive", False))
         self.v_ocr = tk.StringVar(value=prefs.get("ocr", "auto"))
-        self.v_engine = tk.StringVar(value=prefs.get("ocr_engine", "tesseract"))
+        self.v_engine = tk.StringVar(value="mistral")
         self.v_lang = tk.StringVar(value=prefs.get("ocr_language", "auto"))
         self.v_key = tk.StringVar(value="")        # never persisted
         self.v_cols = tk.StringVar(value=prefs.get("columns", "auto"))
@@ -100,9 +100,6 @@ class ConvertTab(ttk.Frame):
             row=0, column=0, padx=6, pady=6)
         ttk.Combobox(box, textvariable=self.v_ocr, width=8, state="readonly",
                      values=["auto", "off", "always"]).grid(row=0, column=1)
-        self.tr.label(ttk.Label(box), "label.using").grid(row=0, column=2, padx=6)
-        ttk.Combobox(box, textvariable=self.v_engine, width=10, state="readonly",
-                     values=["tesseract", "mistral"]).grid(row=0, column=3)
         self.tr.label(ttk.Label(box), "label.language").grid(row=0, column=4, padx=6)
         ttk.Entry(box, textvariable=self.v_lang, width=10).grid(
             row=0, column=5, sticky="w")

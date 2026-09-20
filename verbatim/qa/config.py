@@ -111,4 +111,9 @@ CONFIG = {
     "SIMILARITY_REWRITTEN": 0.95,
     # Recognition confidence below which a file always needs a human.
     "OCR_CONF_MIN": 0.75,
+    # Recognition confidence below which a recognised scan is not used as
+    # evidence at all. Below this the recogniser's own reading is too poor to
+    # tell an invented passage from a misread one, and comparing against it
+    # produces false alarms rather than findings.
+    "CROSSCHECK_CONF_MIN": 0.70,
 }

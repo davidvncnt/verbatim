@@ -15,7 +15,8 @@ Le README décrit l'installation pas à pas, clic par clic. En bref :
 
    Ne lancez **pas** `pip install verbatim` seul : ce nom appartient à un autre
    logiciel, sans rapport, et vous installeriez le mauvais outil.
-3. Seulement pour les PDF **numérisés**, installez Tesseract — voir le README.
+3. Tesseract ne sert qu'à *vérifier* les PDF numérisés, pas à les convertir —
+   voir le README. Convertir une numérisation nécessite une clé Mistral.
 
 Si `verbatim` est ensuite « introuvable », utilisez `python3 -m verbatim` (Mac)
 ou `py -m verbatim` (Windows) à la place.
@@ -52,9 +53,21 @@ correspondants dans **Dossier des PDF** (mêmes noms de fichiers), ou cochez
   paragraphe** : inutile de lire tout le fichier.
 - Un fond **mauve** signale des mots produits par un modèle plutôt que lus dans
   le PDF. Rien dans le document ne peut les confirmer : vérifiez-les tous.
+- **Afficher** ne garde qu'un type de problème à la fois : une série de fichiers
+  au même défaut se juge bien plus vite qu'une liste mélangée.
+- **Fiabilité minimale de la numérisation** fixe le seuil à partir duquel la
+  lecture d'une numérisation sert à vérifier le texte. En dessous, verbatim dit
+  que la numérisation n'a pas pu être lue plutôt que de signaler de fausses
+  erreurs.
+- Dans l'aperçu du PDF, déplacez-vous avec deux doigts sur le pavé tactile, ou
+  en faisant glisser la page.
 - Inscrivez votre nom dans **Vérifié par** (il est retenu) et, si utile, une
   **Remarque**. Cliquez ensuite sur **Accepter**, **À retravailler** ou
   **Rejeter**. Le fichier suivant s'ouvre automatiquement.
+
+**Résumé…** indique ce qu'il est advenu du dossier — combien de fichiers ont été
+vérifiés, par qui, comment ils ont été décidés, et où vous n'êtes pas d'accord
+avec l'outil — et exporte une ligne par fichier en CSV, pour un tableur.
 
 Pour les fichiers convertis par verbatim, votre décision est enregistrée à côté
 du fichier. Pour les autres, les vérifications et votre décision sont
@@ -71,6 +84,8 @@ dossier, et vos collègues ne voient pas ces décisions.
 | *N page(s) ont été produites par un modèle* | Ces pages n'ont pas été lues dans le PDF mais générées. Vérifiez chaque mot. |
 | *N mot(s) semblent brouillés* | Le texte du PDF lui-même est abîmé et entremêle deux lignes. Reconvertissez avec **Reconnaître le texte** réglé sur *always*. |
 | *les mêmes N mots se répètent sans fin* | La reconnaissance a bouclé. Reconvertissez le fichier. |
+| *un tableau a N % de ses cellules remplies avec la même valeur* | Une reconnaissance incapable de lire le tableau a pu en inventer le contenu. Comparez avec la page. |
+| *N mot(s) ici seraient inattendus dans ce type de document* | Des mots qui n'apparaissent nulle part dans les textes de référence. Souvent le signe d'un texte inventé : lisez ce passage. |
 | *la reconnaissance n'est sûre qu'à N %* | Numérisation de mauvaise qualité. Lisez attentivement. |
 
 ## Si le résultat semble incorrect

@@ -15,7 +15,8 @@ The README has the full step-by-step installation, with every click spelled out.
 
    Do **not** run `pip install verbatim` on its own: that name belongs to an
    unrelated program, and you would get the wrong tool.
-3. Only for **scanned** PDFs, install Tesseract — see the README.
+3. Tesseract is only needed to *check* scanned PDFs, not to convert them —
+   see the README. Converting a scan needs a Mistral key.
 
 If `verbatim` is "not found" afterwards, use `python3 -m verbatim` (Mac) or
 `py -m verbatim` (Windows) instead.
@@ -52,9 +53,20 @@ or tick **Text checks only (no PDF)**.
 - A **purple** background means those words were produced by a model rather
   than read from the PDF. Nothing in the document can confirm them, so check
   every one.
+- **Show** narrows the list to one kind of problem at a time, which is much
+  quicker to work through than a mixed list.
+- **Trust a scan read at least … %** sets how sure the recogniser must be before
+  its reading of a scan is used to check the text. Below it, verbatim says the
+  scan could not be read rather than raising false alarms.
+- In the PDF preview, move around with two fingers on the trackpad, or by
+  dragging the page.
 - Enter your name in **Checked by** (remembered for next time) and, if
   useful, a **Note**. Then press **Accept**, **Needs work** or **Reject**. It
   moves to the next file on its own.
+
+**Summary…** shows what came of the folder — how many files were checked, by
+whom, how they were decided, and where you disagreed with the tool — and exports
+one row per file as a CSV for a spreadsheet.
 
 For files verbatim converted, your decision is saved next to the file. For any
 other file, the checks and your decision are saved **on your computer only** —
@@ -70,6 +82,8 @@ nothing is written into the folder, and colleagues do not see those decisions.
 | *N page(s) were produced by a model* | Those pages were not read from the PDF but generated. Check every word. |
 | *N word(s) look scrambled* | The PDF's own text is damaged, weaving two lines together. Usually needs re-converting with **Recognise text** set to *always*. |
 | *the same N words repeat over and over* | The recogniser got stuck. Re-convert the file. |
+| *a table has N% of its cells filled with the same value* | A recogniser that could not read the table may have invented its contents. Compare it with the page. |
+| *N word(s) here would not be expected in this kind of document* | Words that appear nowhere in the material this tool learned from. Often a sign of invented text — read that passage. |
 | *the recogniser was only N% confident* | A poor scan. Read it carefully. |
 
 ## If something looks wrong
