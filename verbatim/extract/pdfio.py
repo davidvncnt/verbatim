@@ -10,10 +10,23 @@ detection, column detection, OCR — sees an upright page.
 from __future__ import annotations
 
 import math
+import threading
 from collections import Counter
 from pathlib import Path
 
 import pdfplumber
+
+# Rendering a page goes through PDFium, which must never be entered from two
+# threads at once, even for two different documents: it corrupts memory rather
+# than raising. The review window draws pages while a background check may be
+# rendering others for recognition, so every render takes this lock.
+RENDER_LOCK = threading.Lock()
+
+
+def render(page, resolution: int):
+    """The page as a PIL image, rendered under `RENDER_LOCK`."""
+    with RENDER_LOCK:
+        return page.to_image(resolution=resolution).original
 
 
 def text_angle(char) -> int:

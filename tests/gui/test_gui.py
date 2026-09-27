@@ -205,7 +205,7 @@ def test_a_decision_is_written_down_and_moves_on(app, converted):
     assert record["review"]["reviewer"] == "RA1"
     assert record["review"]["tool_said"] == "reject"
     assert tab.current_txt != first, "the queue did not advance"
-    assert tab.v_progress.get().startswith("1 of ")
+    assert tab.v_progress.get().startswith("Decided: 1 of ")
 
 
 def test_a_reviewed_file_is_marked_as_done(app):
@@ -433,8 +433,11 @@ def test_the_folder_is_ordered_worst_first_once_read(app, corpus):
     tab.v_pdf_folder.set(str(pdfs))
     tab.load(txt)
     wait_for(app, lambda: tab.store is not None and len(tab.store.triage()) == 3)
-    wait_for(app, lambda: "looping.txt" in tab.queue.get(0))
-    assert "✗" in tab.queue.get(0)
+    # The file opened on arrival has had its full check, so it leads; of the
+    # rest, the one the quick sort found worst comes first.
+    wait_for(app, lambda: "looping.txt" in tab.queue.get(1)
+             and "✗" in tab.queue.get(1))
+    assert "accents.txt" in tab.queue.get(0)
 
 
 def test_an_uncompared_file_is_not_ticked_as_verified(app, corpus):
@@ -601,3 +604,152 @@ def test_the_window_has_its_own_icon(app):
     assets = _Path(app.review_tab.__module__ and "verbatim/assets")
     assert (assets / "icon.png").is_file() and (assets / "icon.ico").is_file()
     assert getattr(app, "_icon", None) is not None
+
+
+# --- analysing a whole folder ahead of the reviewer ------------------------
+
+def wait_for_batch(window):
+    tab = window.review_tab
+    wait_for(window, lambda: not tab._batch_running, timeout=180)
+
+
+def test_the_whole_folder_can_be_analysed_at_once(app, corpus):
+    """Without it, a file shows what the PDF says only once it is opened."""
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    tab.batch_size.current(0)                       # all files
+    tab._batch_clicked()
+    assert tab._batch_running
+    assert tab.batch_button.cget("text") == "Stop"
+    wait_for_batch(app)
+    assert all(e.analysed for e in tab.entries)
+    assert "✗" in tab.queue.get(tab._row_of["simple.txt"])    # the invented passage
+    assert "✓" in tab.queue.get(tab._row_of["accents.txt"])
+    assert "Analysis finished" in tab.v_status.get()
+    assert tab.batch_button.cget("text") == "Analyse"
+
+
+def test_an_analysed_folder_shows_its_results_when_reopened(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    tab._batch_clicked()
+    wait_for_batch(app)
+
+    tab.load(txt)
+    app.update()
+    simple = tab._by_name["simple.txt"]
+    assert simple.record is None and simple.analysed
+    assert "✗" in tab.queue.get(tab._row_of["simple.txt"])
+
+
+def test_a_few_files_can_be_analysed_at_a_time(app, corpus, monkeypatch):
+    """Those analysed rise to the top of the list; the rest wait their turn."""
+    from verbatim.gui import review_tab
+    monkeypatch.setattr(review_tab, "BATCH_SIZES", (None, 1))
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    tab._label_batch()
+    wait_for(app, lambda: tab.current is not None)   # the file opened on arrival
+    tab.batch_size.current(1)
+    tab._batch_clicked()
+    wait_for_batch(app)
+    assert len([e for e in tab.entries if e.analysed]) == 2
+    assert [e.analysed for e in tab.shown] == [True, True, False]
+
+
+def test_an_analysis_can_be_stopped(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    wait_for(app, lambda: not tab._triaging)
+    tab._batch_clicked()
+    tab._batch_clicked()
+    assert not tab._batch_running
+    assert "Analysis stopped" in tab.v_status.get()
+    assert str(tab.batch_size.cget("state")) == "readonly"
+
+
+def test_the_analysis_speaks_french(app, corpus):
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.load(txt)
+    app.v_lang.set(i18n.LANGUAGES["fr"])
+    app._language_chosen()
+    app.update()
+    assert tab.batch_button.cget("text") == "Analyser"
+    assert tab.batch_size.get() == "tous les fichiers"
+
+
+def test_an_analysis_asked_for_during_the_sort_waits_for_it(app, corpus, monkeypatch):
+    """Otherwise "the next 100" would be the first 100 by name, not the 100
+    most suspect."""
+    from verbatim.gui import review_tab
+    from verbatim.qa import external as ext
+    monkeypatch.setattr(review_tab, "BATCH_SIZES", (None, 1))
+    quick = ext.quick_verdict
+
+    def slow(path, *a, **k):
+        time.sleep(0.4)
+        return quick(path, *a, **k)
+
+    monkeypatch.setattr(ext, "quick_verdict", slow)
+    txt, pdfs = corpus
+    (txt / "a_first.txt").write_text((txt / "accents.txt").read_text("utf-8"),
+                                     encoding="utf-8")
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    tab._label_batch()
+    tab.batch_size.current(1)
+    tab._batch_clicked()
+    assert tab._batch_after_triage, "the analysis started before the sort ended"
+    assert tab.batch_button.cget("text") == "Stop"
+    wait_for(app, lambda: "analysis next" in tab.v_busy.get())
+    wait_for_batch(app)
+    # By name, accents.txt was next; by the sort, the looping file is worse.
+    assert tab._by_name["looping.txt"].analysed
+    assert not tab._by_name["accents.txt"].analysed
+
+
+def test_an_analysis_waiting_for_the_sort_can_be_cancelled(app, corpus, monkeypatch):
+    from verbatim.qa import external as ext
+    quick = ext.quick_verdict
+    monkeypatch.setattr(ext, "quick_verdict",
+                        lambda p, *a, **k: (time.sleep(0.4), quick(p, *a, **k))[1])
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    tab._batch_clicked()
+    assert tab._batch_after_triage
+    tab._batch_clicked()
+    assert not tab._batch_running and not tab._batch_after_triage
+    assert "cancelled" in tab.v_status.get()
+    wait_for(app, lambda: not tab._triaging)
+    app.update()
+    assert not tab._batch_running
+
+
+def test_a_late_result_is_not_given_to_a_file_of_the_same_name(app, corpus, tmp_path):
+    """A check that finishes after another folder was opened belongs to the
+    first folder's file, even when the second has one with the same name."""
+    txt, _pdfs = corpus
+    tab = app.review_tab
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "accents.txt").write_text("other text", encoding="utf-8")
+    tab.load(other)
+    wait_for(app, lambda: not tab._checking)
+    tab._by_name["accents.txt"].record = None
+    tab._results.put(("checked", 0, txt / "accents.txt",
+                      {"assessment": {"verdict": "reject", "findings": []}}))
+    wait_for(app, lambda: tab._results.empty())
+    app.update()
+    assert tab._by_name["accents.txt"].record is None

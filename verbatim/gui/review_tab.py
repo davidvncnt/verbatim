@@ -26,6 +26,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -34,7 +35,7 @@ from .. import i18n, sidecar
 from ..pipeline import Stopped
 from ..qa import external
 from ..qa.config import CONFIG
-from ..review_store import LocalStore, text_stamp
+from ..review_store import LocalStore, summarise, text_stamp
 from ..settings import load_prefs, save_prefs
 from .widgets import (
     MUTED,
@@ -64,6 +65,14 @@ VERDICT_MARK = {"ok": "✓", "review": "!", "reject": "✗", "unknown": "?"}
 UNCOMPARED_MARK = "○"
 RANK = {"reject": 0, "review": 1, "unknown": 2, "ok": 3}
 
+# How many files one press of "Analyse" takes on; None is every file. Scans are
+# read by the recogniser at a few seconds a page, so a folder of them can take
+# hours, and a reviewer may rather start on the first hundred.
+BATCH_SIZES = (None, 25, 100, 500)
+# While a folder is being analysed, the list is put back in order this often,
+# so that finished files rise to the top without the list jumping constantly.
+BATCH_RESORT_SECONDS = 20
+
 DECISION_MARK = {"accepted": ("☑", "#1b6b2f"), "needs_work": ("⊙", "#8a5a00"),
                  "rejected": ("☒", "#b3261e")}
 
@@ -85,12 +94,23 @@ class Entry:
     record: dict | None = None    # the full check, once there is one
     triage: str = "unknown"       # quick text-only verdict, for ordering
     kinds: list = field(default_factory=list)   # kinds of problem found
+    # What the last full check found, without the check itself: enough to
+    # colour the row. The full check is read from disk when the file is opened.
+    summary: dict | None = None
 
     @property
     def verdict(self) -> str:
         if self.record is not None:
             return self.record.get("assessment", {}).get("verdict", "unknown")
+        if self.summary is not None:
+            return self.summary.get("verdict", "unknown")
         return self.triage
+
+    @property
+    def analysed(self) -> bool:
+        """Has the full check run, rather than only the quick sort?"""
+        return (self.kind == "verbatim" or self.record is not None
+                or self.summary is not None)
 
     @property
     def problems(self) -> list:
@@ -99,6 +119,8 @@ class Entry:
             return sorted({f.get("kind", "")
                            for f in self.record.get("assessment", {}).get("findings", [])
                            if f.get("kind")})
+        if self.summary is not None:
+            return list(self.summary.get("kinds", []))
         return list(self.kinds)
 
     @property
@@ -107,7 +129,13 @@ class Entry:
         has been; any other file only once a full check found the PDF."""
         if self.kind == "verbatim":
             return True
-        return bool(self.record) and self.record.get("reference") not in (None, "none")
+        if self.record is not None:
+            return self.record.get("reference") not in (None, "none")
+        return bool(self.summary and self.summary.get("compared"))
+
+
+class _GiveWay(Stopped):
+    """Raised inside a batch check when the reviewer wants a file checked."""
 
 
 class ReviewTab(ttk.Frame):
@@ -148,6 +176,25 @@ class ReviewTab(ttk.Frame):
         self._worker: threading.Thread | None = None
         self._checking = False
         self._closing = False
+        # Analysing many files ahead of the reviewer. The same thread does it,
+        # between requests for the file on screen, which always come first:
+        # PDFium cannot render two pages at once, and the reviewer should
+        # never wait behind a file they have not asked for.
+        self._batch_lock = threading.Lock()
+        self._batch: tuple | None = None      # (generation, options, files left)
+        self._batch_gen = 0
+        self._batch_running = False
+        # Pressed while the quick sort is still reading the folder: the files
+        # to analyse are chosen once it has finished, so that "the next 100"
+        # are the worst 100 and not the first 100 in alphabetical order.
+        self._batch_after_triage = False
+        self._batch_size_asked = None
+        self._triaging = False
+        self._batch_total = 0
+        self._batch_done = 0
+        self._batch_failed = 0
+        self._batch_started = 0.0
+        self._batch_resorted = 0.0
 
         prefs = load_prefs()
         self.v_pdf_folder = tk.StringVar(value=prefs.get("review_pdf_folder", ""))
@@ -157,6 +204,7 @@ class ReviewTab(ttk.Frame):
         self.v_busy = tk.StringVar()
         self.v_folder = tk.StringVar(value=prefs.get("review_folder", ""))
         self.v_reviewer = tk.StringVar(value=prefs.get("reviewer", ""))
+        self._batch_choice = prefs.get("review_batch_size", None)
         self.v_note = tk.StringVar()
         self.v_progress = tk.StringVar()
         self.v_page = tk.StringVar()
@@ -249,6 +297,36 @@ class ReviewTab(ttk.Frame):
         bar.grid(row=1, column=1, sticky="ns")
         self.queue.configure(yscrollcommand=bar.set)
         self.queue.bind("<<ListboxSelect>>", self._file_chosen)
+
+        # Run the full check on many files at once, so that the colours in the
+        # list mean something before each file is opened.
+        run = ttk.Frame(box)
+        run.grid(row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
+        run.columnconfigure(1, weight=1)
+        self.batch_button = ttk.Button(run, command=self._batch_clicked)
+        self.batch_button.grid(row=0, column=0, sticky="w")
+        self.batch_size = ttk.Combobox(run, state="readonly", width=14)
+        self.batch_size.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.batch_size.bind("<<ComboboxSelected>>", self._batch_size_chosen)
+        self._label_batch()
+        self.tr.callback(self._label_batch)
+
+    def _label_batch(self):
+        self.batch_button.configure(text=i18n.t(
+            "review.batch.stop" if self._batch_running else "review.batch.start"))
+        self.batch_size.configure(values=[
+            i18n.t("review.batch.all") if n is None
+            else i18n.t("review.batch.n", n=i18n.number(n)) for n in BATCH_SIZES])
+        choice = self._batch_choice if self._batch_choice in BATCH_SIZES else None
+        self.batch_size.current(BATCH_SIZES.index(choice))
+        self.batch_size.configure(state="disabled" if self._batch_running
+                                  else "readonly")
+
+    def _batch_size_chosen(self, _event=None):
+        self._batch_choice = BATCH_SIZES[max(0, self.batch_size.current())]
+        prefs = load_prefs()
+        prefs["review_batch_size"] = self._batch_choice
+        save_prefs(prefs)
 
     def _refresh_filter_choices(self):
         kinds = sorted({k for e in self.entries for k in e.problems})
@@ -498,6 +576,12 @@ class ReviewTab(ttk.Frame):
         prefs["review_text_only"] = self.v_text_only.get()
         prefs["review_crosscheck_conf"] = conf
         save_prefs(prefs)
+        # Every result in the list was reached under the old options. Show the
+        # ones already known under the new ones, and let the rest go grey.
+        if self._batch_running:
+            self._stop_batch()
+        self._attach_checks(self.entries)
+        self._resort()
         # The open file was checked under the old options: check it again.
         if self.current_entry is not None and self.current_entry.kind == "external":
             self._open(self.current_entry)
@@ -516,8 +600,11 @@ class ReviewTab(ttk.Frame):
         prefs = load_prefs()
         prefs["review_folder"] = str(folder)
         save_prefs(prefs)
+        if self._batch_running:
+            self._stop_batch(quiet=True)
         self._folder_gen += 1
         self._generation += 1
+        self._triaging = False
         self._clear_file()
         self._busy("", None)
 
@@ -544,6 +631,7 @@ class ReviewTab(ttk.Frame):
                 txt, "external",
                 triage=known.get("verdict", "unknown") if fresh else "unknown",
                 kinds=list(known.get("kinds", [])) if fresh else []))
+        self._attach_checks(entries)
 
         self.entries = sorted(entries, key=self._sort_key)
         self._by_name = {e.txt.name: e for e in self.entries}
@@ -567,13 +655,47 @@ class ReviewTab(ttk.Frame):
         verdict = entry.verdict
         if not entry.compared and verdict == "ok":
             verdict = "unknown"         # not compared: not as good as verified
-        return (self._decided(entry), RANK.get(verdict, 2), entry.txt.name)
+        # Files the full check has been through come first, worst first; then
+        # the rest, ordered by the quick sort.
+        return (self._decided(entry), not entry.analysed,
+                RANK.get(verdict, 2), entry.txt.name)
+
+    def _check_options(self) -> tuple:
+        """What a check depends on, as chosen in the window right now."""
+        text_only = self.v_text_only.get()
+        return (None if text_only else self._pdf_folder(),
+                external.TEXT_ONLY if text_only else external.FULL,
+                self._conf_fraction())
+
+    def _attach_checks(self, entries):
+        """Give each file what its last full check found, if that still applies.
+
+        Only the size and date of the files are looked at, so that a folder
+        opens at once however large it is. Opening a file compares contents.
+        """
+        if self.store is None:
+            return
+        known = self.store.checked_names()
+        pdf_folder, mode, conf = self._check_options()
+        for entry in entries:
+            if entry.kind != "external":
+                continue
+            entry.record = None
+            entry.summary = None
+            if entry.txt.name not in known:
+                continue
+            pdf = None if mode == external.TEXT_ONLY \
+                else external.find_pdf(entry.txt, pdf_folder)
+            entry.summary = self.store.checked(
+                entry.txt, pdf_path=pdf, pdf_stamp=external.file_stamp(pdf),
+                mode=mode, ocr=True, crosscheck_conf=conf)
 
     def _start_triage(self):
         todo = [e.txt for e in self.entries
                 if e.kind == "external" and e.record is None and e.triage == "unknown"]
         if not todo or self.store is None:
             return
+        self._triaging = True
         gen, store = self._folder_gen, self.store
 
         def run():
@@ -790,39 +912,229 @@ class ReviewTab(ttk.Frame):
 
     def _work_loop(self):
         while not self._closing:
-            try:
-                job = self._jobs.get(timeout=0.2)
-            except queue.Empty:
+            job = self._take_job(wait=not self._batch_waiting())
+            if job is not None:
+                self._run_check(job)
                 continue
-            while True:                          # only the newest request matters
-                try:
-                    job = self._jobs.get_nowait()
-                except queue.Empty:
-                    break
-            gen, txt, pdf, mode, store, conf = job
-            if gen != self._generation:
-                continue
+            item = self._next_batch_item()
+            if item is not None:
+                self._run_batch_item(*item)
 
-            def progress(done, total, _note="", _gen=gen, _name=txt.name):
-                if _gen != self._generation or self._closing:
+    def _take_job(self, wait: bool):
+        """The newest request for the file on screen, if there is one."""
+        try:
+            job = self._jobs.get(timeout=0.2) if wait else self._jobs.get_nowait()
+        except queue.Empty:
+            return None
+        while True:                              # only the newest request matters
+            try:
+                job = self._jobs.get_nowait()
+            except queue.Empty:
+                return job
+
+    def _run_check(self, job):
+        gen, txt, pdf, mode, store, conf = job
+        if gen != self._generation:
+            return
+
+        def progress(done, total, _note="", _gen=gen, _name=txt.name):
+            if _gen != self._generation or self._closing:
+                raise Stopped()
+            self._results.put(("progress", _gen, _name, done, total))
+
+        try:
+            record = external.check(txt, pdf_path=pdf, mode=mode, ocr=True,
+                                     progress=progress, crosscheck_conf=conf)
+        except Stopped:
+            return
+        except Exception as exc:
+            self._results.put(("failed", gen, txt, f"{type(exc).__name__}: {exc}"))
+            return
+        if store is not None:
+            try:
+                store.save_check(txt, record)
+            except OSError:
+                pass
+            record["review"] = store.decision(txt.name)
+        self._results.put(("checked", gen, txt, record))
+
+    # -- analysing many files ---------------------------------------------
+
+    def _batch_clicked(self):
+        if self._batch_running:
+            self._stop_batch()
+        else:
+            self._start_batch()
+
+    def _start_batch(self):
+        if self.store is None:
+            return
+        # Read now: what was chosen when the button was pressed is what counts.
+        self._batch_size_asked = BATCH_SIZES[max(0, self.batch_size.current())]
+        if self._triaging:
+            self._batch_after_triage = True
+            self._batch_running = True
+            self._label_batch()
+            self.v_status.set(i18n.t("review.batch.after_triage"))
+            return
+        self._launch_batch()
+
+    def _launch_batch(self):
+        self._batch_after_triage = False
+        size = self._batch_size_asked
+        # In the order of the list, so the files at the top — the worst ones
+        # by the quick sort, and those of the kind being filtered on — go first.
+        todo = [e.txt for e in self.shown
+                if not e.analysed and not self._decided(e)]
+        if size:
+            todo = todo[:size]
+        if not todo:
+            self._batch_running = False
+            self._label_batch()
+            self._busy(i18n.t("review.batch.nothing"), None)
+            return
+        self.v_status.set("")
+        with self._batch_lock:
+            self._batch_gen += 1
+            self._batch = (self._batch_gen, self._check_options(), self.store,
+                           deque(todo))
+        self._batch_running = True
+        self._batch_total = len(todo)
+        self._batch_done = self._batch_failed = 0
+        self._batch_started = self._batch_resorted = time.monotonic()
+        self._label_batch()
+        self._show_batch_progress(None, 0, 0)
+        self._ensure_worker()
+
+    def _stop_batch(self, quiet: bool = False):
+        with self._batch_lock:
+            self._batch_gen += 1
+            self._batch = None
+        if self._batch_after_triage:
+            # Nothing was analysed yet: there is nothing to report but that.
+            self._batch_after_triage = False
+            self._finish_batch(stopped=True, quiet=True)
+            if not quiet:
+                self.v_status.set(i18n.t("review.batch.cancelled"))
+            return
+        self._finish_batch(stopped=True, quiet=quiet)
+
+    def _finish_batch(self, stopped: bool, quiet: bool = False):
+        self._batch_running = False
+        self._label_batch()
+        if self.store is not None:
+            try:
+                self.store.flush_index()
+            except OSError:
+                pass
+        if quiet:
+            return
+        key = "review.batch.stopped" if stopped else "review.batch.finished"
+        message = i18n.t(key, done=i18n.number(self._batch_done),
+                         total=i18n.number(self._batch_total))
+        if self._batch_failed:
+            message += " " + i18n.t("review.batch.failed",
+                                    n=i18n.number(self._batch_failed))
+        if not self._checking:
+            self._busy(message, None)
+        self.v_status.set(message)
+        self._resort()
+
+    def _batch_waiting(self) -> bool:
+        with self._batch_lock:
+            return bool(self._batch and self._batch[3])
+
+    def _next_batch_item(self):
+        with self._batch_lock:
+            if not self._batch or not self._batch[3]:
+                return None
+            gen, options, store, files = self._batch
+            return gen, options, store, files.popleft()
+
+    def _run_batch_item(self, gen, options, store, txt):
+        """Check one file of a batch. Runs on the worker thread."""
+        pdf_folder, mode, conf = options
+
+        def alive():
+            return gen == self._batch_gen and not self._closing
+
+        if not alive():
+            return
+        try:
+            pdf = None if mode == external.TEXT_ONLY \
+                else external.find_pdf(txt, pdf_folder)
+            record = store.cached_check(
+                txt, text_sha256=external.sha256_file(txt), pdf_path=pdf,
+                pdf_stamp=external.file_stamp(pdf), mode=mode, ocr=True,
+                crosscheck_conf=conf)
+        except OSError:
+            record = None
+        if record is not None:
+            store.note_check(txt, record)
+        else:
+            def progress(done, total, _note=""):
+                if not alive():
                     raise Stopped()
-                self._results.put(("progress", _gen, _name, done, total))
+                if not self._jobs.empty():
+                    raise _GiveWay()
+                self._results.put(("batch_progress", gen, txt.name, done, total))
 
             try:
                 record = external.check(txt, pdf_path=pdf, mode=mode, ocr=True,
                                          progress=progress, crosscheck_conf=conf)
+            except _GiveWay:
+                # The reviewer opened a file that needs checking. This one
+                # starts again afterwards, from its first page.
+                with self._batch_lock:
+                    if self._batch and self._batch[0] == gen:
+                        self._batch[3].appendleft(txt)
+                return
             except Stopped:
-                continue
+                return
             except Exception as exc:
-                self._results.put(("failed", gen, txt, f"{type(exc).__name__}: {exc}"))
-                continue
-            if store is not None:
+                self._results.put(("batch_failed", gen, txt.name,
+                                   f"{type(exc).__name__}: {exc}"))
+                record = None
+            if record is not None:
                 try:
-                    store.save_check(txt, record)
+                    store.save_check(txt, record, flush=False)
                 except OSError:
                     pass
-                record["review"] = store.decision(txt.name)
-            self._results.put(("checked", gen, txt, record))
+        if record is not None:
+            self._results.put(("batch_checked", gen, txt.name,
+                               summarise(txt, record)))
+        if not self._batch_waiting() and alive():
+            try:
+                store.flush_index()
+            except OSError:
+                pass
+            self._results.put(("batch_done", gen))
+
+    def _show_batch_progress(self, name, page_done, page_total):
+        done, total = self._batch_done, self._batch_total
+        fraction = done / total if total else 0.0
+        if name and page_total:
+            fraction += (page_done / page_total) / total
+        message = i18n.t("review.batch.progress", done=i18n.number(done),
+                         total=i18n.number(total))
+        if name:
+            message += " — " + name
+            if page_total > 1:
+                # Reported as each page begins, so the page being read is
+                # one past the pages done.
+                message += " " + i18n.t("review.batch.page",
+                                        done=min(page_done + 1, page_total),
+                                        total=page_total)
+        # Only once a few files have gone by: the first file may be a
+        # two-hundred-page scan, or a single page of text.
+        elapsed = time.monotonic() - self._batch_started
+        if done >= 3 and elapsed > 10:
+            left = elapsed / done * (total - done)
+            minutes = max(1, round(left / 60))
+            key = "review.batch.minutes" if minutes < 90 else "review.batch.hours"
+            message += " · " + i18n.t(key, n=minutes if minutes < 90
+                                      else round(minutes / 60))
+        self._busy(message, fraction)
 
     def _busy(self, message: str, fraction: float | None):
         self.v_busy.set(message)
@@ -833,6 +1145,7 @@ class ReviewTab(ttk.Frame):
             return
         deadline = time.monotonic() + 0.05
         triage_progress = None
+        batch_progress = None
         resort = False
         while time.monotonic() < deadline:
             try:
@@ -853,6 +1166,7 @@ class ReviewTab(ttk.Frame):
                 triage_progress = (n, total)
             elif kind == "triage_done":
                 if msg[1] == self._folder_gen:
+                    self._triaging = False
                     resort = True
             elif kind == "progress":
                 _, gen, name, done, total = msg
@@ -862,18 +1176,49 @@ class ReviewTab(ttk.Frame):
             elif kind == "checked":
                 _, gen, txt, record = msg
                 entry = self._by_name.get(txt.name)
-                if entry is not None:
+                # By path, not by name: a check that finishes after another
+                # folder was opened belongs to a file of the same name there.
+                if entry is not None and entry.txt == txt:
                     entry.record = record
                     self._dirty.add(txt.name)
                 if self.current_entry is not None and txt == self.current_entry.txt:
                     self._checking = False
                     self._busy("", None)
+                    if self._batch_running:
+                        batch_progress = batch_progress or (None, 0, 0)
                     self._show_record(record)
+            elif kind == "batch_progress":
+                if msg[1] == self._batch_gen:
+                    batch_progress = msg[2:]
+            elif kind == "batch_checked":
+                _, gen, name, summary = msg
+                if gen != self._batch_gen:
+                    continue
+                self._batch_done += 1
+                entry = self._by_name.get(name)
+                if entry is not None and entry.record is None:
+                    entry.summary = summary
+                    self._dirty.add(name)
+                batch_progress = batch_progress or (None, 0, 0)
+            elif kind == "batch_failed":
+                _, gen, name, error = msg
+                if gen == self._batch_gen:
+                    self._batch_done += 1
+                    self._batch_failed += 1
+                    batch_progress = batch_progress or (None, 0, 0)
+            elif kind == "batch_done":
+                if msg[1] == self._batch_gen and self._batch_running:
+                    with self._batch_lock:
+                        self._batch = None
+                    self._finish_batch(stopped=False)
+                    batch_progress = None
             elif kind == "failed":
                 _, gen, txt, error = msg
                 if self.current_entry is not None and txt == self.current_entry.txt:
                     self._checking = False
                     self._busy("", None)
+                    if self._batch_running:
+                        batch_progress = batch_progress or (None, 0, 0)
                     self.findings.delete(0, "end")
                     self.findings.insert("end", "  " + i18n.t(
                         "review.check_failed", name=txt.name, error=error))
@@ -884,14 +1229,27 @@ class ReviewTab(ttk.Frame):
             entry = self._by_name.get(name)
             if entry is not None:
                 self._update_row(entry)
-        if triage_progress and not self._checking:
+        if batch_progress and self._batch_running and not self._checking:
+            self._show_batch_progress(*batch_progress)
+        if (self._batch_running and not resort and time.monotonic()
+                - self._batch_resorted > BATCH_RESORT_SECONDS):
+            self._batch_resorted = time.monotonic()
+            resort = True
+        waiting = self._batch_after_triage
+        if triage_progress and not self._checking and (
+                waiting or not self._batch_running):
             n, total = triage_progress
-            self._busy(i18n.t("review.triage", done=i18n.number(n),
-                              total=i18n.number(total)), n / total)
+            message = i18n.t("review.triage", done=i18n.number(n),
+                             total=i18n.number(total))
+            if waiting:
+                message += " · " + i18n.t("review.batch.next")
+            self._busy(message, n / total)
         if resort:
-            if not self._checking:
+            if not self._checking and not self._batch_running:
                 self._busy("", None)
             self._resort()
+            if self._batch_after_triage and not self._triaging:
+                self._launch_batch()
         self.after(100, self._pump)
 
     def _complex_font(self) -> str | None:
@@ -997,9 +1355,11 @@ class ReviewTab(ttk.Frame):
         try:
             import pdfplumber
             from PIL import Image, ImageTk
+
+            from ..extract.pdfio import render
             with pdfplumber.open(str(pdf)) as doc:
                 page = doc.pages[number - 1]
-                img = page.to_image(resolution=RENDER_DPI).original
+                img = render(page, RENDER_DPI)
                 # Fit the width of the pane. The scale factor is kept so that
                 # the rectangles drawn from PDF points land in the right place
                 # whatever size the window happens to be.
@@ -1193,6 +1553,14 @@ class ReviewTab(ttk.Frame):
         self._closing = True
         self._generation += 1
         self._folder_gen += 1
+        with self._batch_lock:
+            self._batch_gen += 1
+            self._batch = None
+        if self.store is not None:
+            try:
+                self.store.flush_index()
+            except OSError:
+                pass
         if self._resize_job is not None:
             try:
                 self.after_cancel(self._resize_job)

@@ -9,6 +9,8 @@ folder instead:
         folder.json         which folder this is, for a human looking in here
         triage.json         quick text-only verdicts, to order the folder
         checks/<name>.json  the full check of one file, reused while unchanged
+        checked.json        one line per full check, to show a folder's results
+                            as soon as it opens without reading every check
         decisions.json      what the reviewer decided, and who, and when
 
 Decisions are kept apart from checks on purpose: a check is a measurement that
@@ -25,11 +27,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__
-from .settings import config_dir
+from . import __version__, settings
 
 
 def _write_json(path: Path, data) -> None:
@@ -62,12 +64,36 @@ def text_stamp(path: Path) -> str | None:
     return f"{st.st_size}:{st.st_mtime_ns}:r{_revision()}"
 
 
+def summarise(txt: Path, record: dict) -> dict:
+    """The little of a full check that the list of files needs."""
+    findings = record.get("assessment", {}).get("findings") or []
+    return {
+        "stamp": text_stamp(txt),
+        "verbatim_version": record.get("verbatim_version"),
+        "mode": record.get("mode"),
+        "ocr": bool(record.get("ocr")),
+        "crosscheck_conf": record.get("crosscheck_conf"),
+        "source_path": record.get("source_path"),
+        "pdf_stamp": record.get("pdf_stamp"),
+        "verdict": record.get("assessment", {}).get("verdict", "unknown"),
+        "kinds": sorted({f.get("kind") for f in findings if f.get("kind")}),
+        "compared": record.get("reference") not in (None, "none"),
+    }
+
+
 class LocalStore:
     def __init__(self, folder: Path, root: Path | None = None):
         self.folder = Path(folder).resolve()
         ident = hashlib.sha1(str(self.folder).encode("utf-8")).hexdigest()[:16]
-        self.dir = (Path(root) if root else config_dir() / "review") / ident
+        # Looked up on each use rather than imported, so that the test suite's
+        # temporary settings folder is the one used.
+        self.dir = (Path(root) if root else settings.config_dir() / "review") / ident
         self._decisions: dict | None = None
+        # The index of full checks is written from the checking thread and
+        # read from the window, and two writers would race on the same file.
+        self._lock = threading.Lock()
+        self._index: dict | None = None
+        self._index_dirty = False
 
     def _touch_folder_note(self) -> None:
         note = self.dir / "folder.json"
@@ -119,11 +145,62 @@ class LocalStore:
         """
         return _read_json(self._check_path(name), None)
 
-    def save_check(self, txt: Path, record: dict) -> None:
+    def save_check(self, txt: Path, record: dict, *, flush: bool = True) -> None:
+        """Keep a check. `flush=False` defers rewriting the index, for a run
+        over many files that calls `flush_index()` itself every so often."""
         self._touch_folder_note()
         stored = dict(record)
         stored["review"] = None           # decisions live in decisions.json
         _write_json(self._check_path(Path(txt).name), stored)
+        self.note_check(txt, record)
+        if flush:
+            self.flush_index()
+
+    def note_check(self, txt: Path, record: dict) -> None:
+        """Add a check to the index without saving the check itself — for a
+        check that was already saved and has just been found still valid."""
+        line = summarise(txt, record)
+        with self._lock:
+            self._load_index()[Path(txt).name] = line
+            self._index_dirty = True
+
+    def _load_index(self) -> dict:
+        if self._index is None:
+            self._index = _read_json(self.dir / "checked.json", {})
+        return self._index
+
+    def checked_names(self) -> set:
+        with self._lock:
+            return set(self._load_index())
+
+    def flush_index(self) -> None:
+        with self._lock:
+            if not self._index_dirty:
+                return
+            _write_json(self.dir / "checked.json", self._index)
+            self._index_dirty = False
+
+    def checked(self, txt: Path, *, pdf_path: Path | None, pdf_stamp: str | None,
+                mode: str, ocr: bool, crosscheck_conf: float) -> dict | None:
+        """What the last full check of this file found, if it still applies.
+
+        Tested by size and date rather than by reading the file, so that a
+        folder of 21,000 files shows its results the moment it opens. Opening
+        a file still goes through `cached_check`, which compares contents.
+        """
+        with self._lock:
+            line = self._load_index().get(Path(txt).name)
+        if not line:
+            return None
+        same = (line.get("stamp") == text_stamp(txt)
+                and line.get("verbatim_version") == __version__
+                and line.get("mode") == mode
+                and line.get("ocr") == bool(ocr)
+                and line.get("crosscheck_conf") == round(float(crosscheck_conf), 4)
+                and line.get("source_path") == (str(Path(pdf_path).resolve())
+                                                if pdf_path else None)
+                and line.get("pdf_stamp") == pdf_stamp)
+        return line if same else None
 
     # -- decisions --------------------------------------------------------------
 
