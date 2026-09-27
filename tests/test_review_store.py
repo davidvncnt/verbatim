@@ -91,3 +91,29 @@ def test_a_check_from_older_checking_logic_is_redone(tmp_path, monkeypatch):
     store.save_check(txt, _record())
     monkeypatch.setattr(external, "CHECK_REVISION", external.CHECK_REVISION + 1)
     assert store.cached_check(txt, **_args()) is None
+
+
+def test_a_full_check_is_remembered_for_the_list(tmp_path):
+    """A folder analysed yesterday shows its results today, without every
+    file being opened again, and stops showing them once a file changes."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    txt = corpus / "a.txt"
+    txt.write_text("text", encoding="utf-8")
+    store = LocalStore(corpus, root=tmp_path / "prefs")
+    record = _record(crosscheck_conf=0.7, reference="text_layer",
+                     assessment={"verdict": "reject",
+                                 "findings": [{"kind": "invented_words"}]})
+    store.save_check(txt, record, flush=False)
+    store.flush_index()
+
+    again = LocalStore(corpus, root=tmp_path / "prefs")
+    options = {"pdf_path": None, "pdf_stamp": None, "mode": "full", "ocr": True}
+    line = again.checked(txt, crosscheck_conf=0.7, **options)
+    assert line["verdict"] == "reject"
+    assert line["kinds"] == ["invented_words"]
+    assert line["compared"] is True
+    assert again.checked(txt, crosscheck_conf=0.5, **options) is None
+
+    txt.write_text("text, edited", encoding="utf-8")
+    assert again.checked(txt, crosscheck_conf=0.7, **options) is None

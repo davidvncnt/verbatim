@@ -58,7 +58,9 @@ def remove_rules(img, h_frac=0.10, v_frac=0.04):
 def prepare_image(page, args):
     """Render a page and clean it up before recognition."""
     from PIL import Image, ImageOps
-    img = page.to_image(resolution=args.ocr_dpi).original.convert("L")
+
+    from ..extract.pdfio import render
+    img = render(page, args.ocr_dpi).convert("L")
     img = ImageOps.autocontrast(img)
 
     # 1. quarter-turns (a page scanned sideways)
