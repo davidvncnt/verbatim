@@ -26,6 +26,10 @@ dependencies = [
     "pypdf>=4.0",
     "numpy>=1.24",
     "Pillow>=10.0",
+    # Not used by verbatim: pdfplumber -> pdfminer.six needs it. From 49.0 it
+    # ships no wheel for Intel Macs, so pip tries to compile it, which needs a
+    # Rust toolchain no research assistant has. 48 has a universal2 wheel.
+    "cryptography<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 
 [project.optional-dependencies]
