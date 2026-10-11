@@ -150,7 +150,9 @@ def convert(path: Path, args, progress=None, log=print) -> ConversionResult:
             progress(done, total, note)
 
     with tempfile.TemporaryDirectory() as tmp:
-        work = straighten(path, tmp, args.verbose, log)
+        turned: dict = {}
+        work = straighten(path, tmp, args.verbose, log, found=turned)
+        st["sideways_pages"] = sorted(i + 1 for i in turned)
         pages, pending = [], []
         with pdfplumber.open(str(work)) as pdf:
             total = len(pdf.pages)

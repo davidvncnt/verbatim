@@ -38,6 +38,7 @@ CATEGORIES = (
     Category("scrambled", frozenset({
         "scrambled_text", "letter_spacing", "mixed_scripts",
         "control_characters"}), True),
+    Category("sideways", frozenset({"sideways_page"}), True),
     Category("scan", frozenset({
         "scan_unchecked", "ocr_confidence", "no_text_layer", "model_pages"}), True),
     Category("encoding", frozenset({"garbled_characters"}), False),
