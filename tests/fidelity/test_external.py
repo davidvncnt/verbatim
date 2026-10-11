@@ -56,7 +56,7 @@ def test_a_garbled_old_reading_is_caught(synthetic_dir, tmp_path):
     record = run(tmp_path, old_style(synthetic_dir / "sideways.pdf"),
                  synthetic_dir / "sideways.pdf")
     assert record["assessment"]["verdict"] == "reject"
-    assert "invented_words" in kinds(record)
+    assert {"invented_text", "invented_numbers"} & set(kinds(record))
 
 
 # --- damage ---------------------------------------------------------------
@@ -75,9 +75,12 @@ def test_an_invented_sentence_is_one_located_finding(simple, tmp_path):
         "commissions.")
     record = run(tmp_path, damaged, pdf)
     found = record["assessment"]["findings"]
-    assert kinds(record) == ["invented_words"], [f["message_en"] for f in found]
+    assert kinds(record) == ["invented_text"], [f["message_en"] for f in found]
     assert found[0]["page"] == 2
-    assert "permanent trust fund" in damaged[found[0]["char_start"]:found[0]["char_end"]]
+    flagged = damaged[found[0]["char_start"]:found[0]["char_end"]]
+    assert "permanent trust fund" in flagged
+    assert "information submitted" not in flagged, "the sound sentence is not flagged"
+    assert flagged[0].isupper() or flagged[0].islower(), "a passage starts on a word"
 
 
 def test_a_changed_date_is_reported_once(simple, tmp_path):

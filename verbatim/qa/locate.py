@@ -31,6 +31,7 @@ class Reference:
     def __init__(self, text: str, spans: list):
         self.text = text
         self.tokens = tokens_with_spans(text)
+        self.spans = [_as_dict(sp) for sp in spans]
         regions: dict = defaultdict(dict)
         self.sources: dict = {}
         for sp in map(_as_dict, spans):
@@ -56,6 +57,24 @@ class Reference:
             return {}
         start, end = self._ranges[i]
         return self._regions[(start, end)] if start <= offset < end else {}
+
+    def region_between(self, start: int, end: int) -> dict:
+        """{page: bbox} covering every line that a character range touches,
+        so that an outline on the page covers that range and no more."""
+        i = max(bisect.bisect_right(self._starts, start) - 1, 0)
+        out: dict = {}
+        for a, b in self._ranges[i:]:
+            if a >= end:
+                break
+            if b <= start:
+                continue
+            for page, box in self._regions[(a, b)].items():
+                have = out.get(page)
+                if box and have:
+                    box = (min(box[0], have[0]), min(box[1], have[1]),
+                           max(box[2], have[2]), max(box[3], have[3]))
+                out[page] = box or have
+        return out
 
     def token_region(self, j: int) -> dict:
         return self.region_at(self.tokens[j][1]) if 0 <= j < len(self.tokens) else {}

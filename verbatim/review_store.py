@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, settings
+from .qa.categories import worst_by_kind
 
 
 def _write_json(path: Path, data) -> None:
@@ -77,6 +78,7 @@ def summarise(txt: Path, record: dict) -> dict:
         "pdf_stamp": record.get("pdf_stamp"),
         "verdict": record.get("assessment", {}).get("verdict", "unknown"),
         "kinds": sorted({f.get("kind") for f in findings if f.get("kind")}),
+        "severities": worst_by_kind(findings),
         "compared": record.get("reference") not in (None, "none"),
     }
 

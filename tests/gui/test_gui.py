@@ -371,7 +371,7 @@ def test_an_invented_passage_is_found_against_the_pdf(app, corpus):
     record = open_file(app, "simple.txt")
     assert record["reference"] == "text_layer"
     invented = [f for f in record["assessment"]["findings"]
-                if f["kind"] == "invented_words"]
+                if f["kind"] == "invented_text"]
     assert invented, "the invented sentence was not found"
     assert invented[0]["page"] == 2
     flagged = tab.current_text[invented[0]["char_start"]:invented[0]["char_end"]]
@@ -753,3 +753,55 @@ def test_a_late_result_is_not_given_to_a_file_of_the_same_name(app, corpus, tmp_
     wait_for(app, lambda: tab._results.empty())
     app.update()
     assert tab._by_name["accents.txt"].record is None
+
+
+# --- choosing what to look for ---------------------------------------------
+
+def test_hiding_a_kind_of_problem_changes_what_is_shown(app, corpus):
+    """Nothing is checked again: the findings are kept, only hidden."""
+    from verbatim.qa import categories
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    record = open_file(app, "simple.txt")
+    assert "✗" in tab.queue.get(tab._row_of["simple.txt"])
+    everything = len(record["assessment"]["findings"])
+    try:
+        tab._categories_changed(categories.chosen(None) - {"invented"})
+        app.update()
+        assert "✗" not in tab.queue.get(tab._row_of["simple.txt"])
+        shown = [tab.findings.get(i) for i in range(tab.findings.size())]
+        assert any("hidden" in line for line in shown), shown
+        assert len(tab.current["assessment"]["findings"]) == everything
+    finally:
+        tab._categories_changed(categories.chosen(None))
+    app.update()
+    assert "✗" in tab.queue.get(tab._row_of["simple.txt"])
+
+
+def test_the_choice_of_problems_explains_each_one(app):
+    tab = app.review_tab
+    tab._choose_categories()
+    app.update()
+    try:
+        window = tab._categories_window
+        assert window.winfo_exists()
+        flags = tab._category_flags
+        assert flags["invented"].get() and not flags["missing"].get()
+        assert not flags["encoding"].get(), "encoding errors are off by default"
+    finally:
+        window.destroy()
+
+
+def test_the_choice_of_problems_is_remembered(app, corpus):
+    from verbatim.qa import categories
+    from verbatim.settings import load_prefs
+    tab = app.review_tab
+    try:
+        tab._categories_changed(categories.chosen(None) | {"missing"})
+        assert load_prefs()["review_categories"]["missing"] is True
+        assert "missing_from_text" not in tab.view.hidden
+    finally:
+        tab._categories_changed(categories.chosen(None))
+    assert "missing_from_text" in tab.view.hidden
