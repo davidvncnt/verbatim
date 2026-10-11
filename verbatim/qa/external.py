@@ -6,19 +6,24 @@ scripts, some of them by a model that is known to have invented text. They have
 no record of how they were made, so verbatim rebuilds what it needs from the
 source PDF:
 
-  * **text layer** — the PDF holds real text. Every word in the file must come
-    from it, so the comparison is exact: a word or a number that is not in the
-    PDF is reported, and so is a passage of the PDF that never reached the file.
+  * **text layer** — the PDF holds real text, and every passage of the file
+    must come from it. Both are compared as sequences of letters (see
+    qa.letters), so that how a word is written — spacing, accents, a mangled
+    apostrophe, a ligature the PDF cannot decode — is never mistaken for text
+    that is not there. Numbers, table rows and repeated passages are checked
+    too, and passages of the PDF that never reached the file.
 
   * **scan** — the PDF is images. Tesseract reads the pages, and the file is
-    compared with that reading. Recognition makes small errors of its own, so
-    this comparison looks for *passages* with no counterpart rather than single
-    words: a passage of the file with no equivalent anywhere in the scan is
-    where an invented paragraph shows up.
+    compared with that reading in the same way, with shorter sequences and a
+    longer minimum passage, because the recogniser makes small errors of its
+    own.
 
   * **no PDF** — only the checks that read the text on its own can run:
     repetition loops, scrambled words, garbled characters. A fluent paraphrase
     cannot be detected this way, and the record says so.
+
+Every check runs on every file. Which kinds of finding a reviewer sees is
+chosen in the window (qa.categories), not here.
 
 The file itself is never modified. Its passages are anchored onto the pages of
 verbatim's own reading (see qa.locate), so the review window can show each one
@@ -30,33 +35,31 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__
 from ..extract.text import alnum_count
+from . import letters
 from .audit import read_text
+from .categories import worst_by_kind
 from .config import CONFIG
 from .fidelity import (
     HIGH,
     LOW,
     MEDIUM,
     Finding,
-    _segment,
     normalise_reference,
-    tokens_with_spans,
-    words,
 )
 from .intrinsic import intrinsic_findings
-from .locate import Reference, line_spans, page_of, uncovered_runs
+from .locate import Reference, line_spans, page_of
 from .textmetrics import compute_text_metrics
 
 FULL, TEXT_ONLY = "full", "text_only"
 
 # Raised whenever what the checks report changes, so results remembered from
 # an earlier version are redone instead of being shown as current.
-CHECK_REVISION = 2
+CHECK_REVISION = 3
 REF_TEXT_LAYER, REF_RECOGNISED, REF_NONE = "text_layer", "recognised", "none"
 
 # Markers earlier scripts wrote into their output. Blanked — never removed — so
@@ -64,12 +67,7 @@ REF_TEXT_LAYER, REF_RECOGNISED, REF_NONE = "text_layer", "recognised", "none"
 _MARKERS_RE = re.compile(r"\[/?TABLE\]|\[page \d+\]", re.I)
 _NUMBER_RE = re.compile(r"\d+(?:[.,/-]\d+)*")
 
-# A passage shorter than this is not reported: at word level that is ordinary
-# recognition noise, not an invented sentence.
-INVENTED_GAP = 8            # words apart before two inventions are two passages
-SCAN_MIN_RUN = 12           # words of the file with no counterpart in the scan
-MISSING_MIN_RUN = 12        # words of the PDF with no counterpart in the file
-MAX_PASSAGES = 60
+MAX_PASSAGES = 60           # findings of one kind in one file, at most
 
 
 def load_text(path: Path) -> str:
@@ -168,162 +166,354 @@ def _group(positions: list, gap: int) -> list:
     return groups
 
 
-def exact_findings(text: str, raw_text: str, removed: str,
-                   ref: Reference) -> list:
-    """Word-for-word comparison against a PDF text layer, located."""
+def exact_findings(text: str, raw_text: str, removed: str, ref: Reference,
+                   pages: list | None = None) -> list:
+    """Comparison against a PDF text layer, as sequences of letters.
+
+    See qa.letters for why the comparison is not word by word. Each finding
+    is placed where it is: a passage of the text at its own characters, a
+    passage of the PDF at its own lines on the page.
+    """
+    decoded = letters.decode_cids(raw_text, text)
+    known = letters.shingles(decoded)
+    if not known:
+        return []
+    pdf_letters, _ = letters.fold(decoded)
     findings: list = []
-    ref_words = words(normalise_reference(raw_text))
-    if not ref_words:
-        return findings
-    tokens = tokens_with_spans(text)
-    ref_counts = Counter(ref_words)
-    out_counts = Counter(t for t, _, _ in tokens)
-    removed_counts = Counter(words(normalise_reference(removed)))
 
-    extra = out_counts - ref_counts
-    lost = ref_counts - out_counts - removed_counts
-    for word in list(extra):                      # de-hyphenation joins
-        while extra[word] > 0:
-            parts = _segment(word, lost)
-            if parts is None:
-                break
-            for part in parts:
-                lost[part] -= 1
-                if lost[part] <= 0:
-                    del lost[part]
-            extra[word] -= 1
-        if extra[word] <= 0:
-            del extra[word]
-
-    # Words that do not exist in the PDF at all, grouped into passages. A word
-    # that exists but appears too often is duplication, reported separately.
-    # Numbers are left to the numeral check, so a changed date is reported once.
-    absent = {w for w in extra if ref_counts.get(w, 0) == 0 and not w.isdigit()}
-    positions = [i for i, (t, _, _) in enumerate(tokens) if t in absent]
-    groups = _group(positions, INVENTED_GAP)[:MAX_PASSAGES]
-    for group in groups:
-        findings.append(_passage(tokens, group, "invented_words", HIGH))
-
-    # Duplication is counted outside invented passages. An invented sentence
-    # also contains ordinary words — "the", "Parties" — that push their counts
-    # past the PDF's, and reporting that again as repetition would send the
-    # reviewer to the same place twice under a misleading name.
-    near_invention = set()
-    for group in groups:
-        near_invention.update(range(max(0, group[0] - INVENTED_GAP),
-                                    group[-1] + INVENTED_GAP + 1))
-    in_passages = Counter(tokens[i][0] for i in near_invention if i < len(tokens))
-    surplus = {w: n - in_passages.get(w, 0) for w, n in extra.items()
-               if w not in absent and n - in_passages.get(w, 0) > 0}
-    if sum(surplus.values()) >= 8:
-        top = max(surplus, key=surplus.get)
-        seen, at = 0, None
-        for t, a, b in tokens:
-            if t == top:
-                seen += 1
-                if seen > ref_counts[top]:
-                    at = (a, b)
-                    break
-        findings.append(Finding(
-            kind="duplicated_words", severity=MEDIUM, key="duplicated_words",
-            params={"n": sum(surplus.values()),
-                    "sample": ", ".join(sorted(surplus, key=surplus.get,
-                                               reverse=True)[:8])},
-            char_start=at[0] if at else None, char_end=at[1] if at else None))
-
-    findings += _missing_passages(text, ref, removed, min_run=MISSING_MIN_RUN,
-                                  lost=lost)
-    findings += _absent_numbers(text, raw_text)
+    invented = letters.unmatched(text, known)
+    findings += _invented_passages(text, invented)
+    rows, row_ranges = _unfound_rows(text, known, pdf_letters, invented)
+    findings += rows
+    taken = invented + row_ranges
+    findings += _absent_numbers(text, decoded, taken)
+    findings += _repeated_passages(text, pdf_letters)
+    findings += _spelling_variants(text, decoded, pdf_letters, taken)
+    findings += _missing_text(text, ref, pages or [])
     return findings
 
 
-def _absent_numbers(text: str, raw_text: str) -> list:
-    """Numbers the PDF does not contain at all.
-
-    By value, not by count: a number that exists in the PDF but appears once
-    more in the file is repetition, which the duplication finding reports, and
-    calling it "not in the PDF" would be false.
-    """
-    present = set(_NUMBER_RE.findall(normalise_reference(raw_text)))
-    blanked = _MARKERS_RE.sub(lambda m: " " * len(m.group(0)), text)
-    absent = [(m.group(0), m.start(), m.end()) for m in _NUMBER_RE.finditer(blanked)
-              if m.group(0) not in present]
-    if not absent:
-        return []
-    return [Finding(
-        kind="invented_numbers", severity=HIGH, key="invented_numbers",
-        params={"n": len(absent),
-                "sample": ", ".join(dict.fromkeys(v for v, _, _ in absent[:8]))},
-        char_start=absent[0][1], char_end=absent[0][2])]
+def _quote(text: str, start: int, end: int, limit: int = 120) -> str:
+    quote = " ".join(text[start:end].split())
+    return quote if len(quote) <= limit else quote[:limit].rstrip() + "…"
 
 
-def _missing_passages(text: str, ref: Reference, removed: str, *, min_run: int,
-                      lost: Counter | None = None, k: int = 3) -> list:
-    """Passages of the PDF with no counterpart in the file, placed on the page."""
-    ref_words = [t for t, _, _ in ref.tokens]
-    file_words = words(text)
-    removed_words = set(words(normalise_reference(removed)))
+def _inside(start: int, end: int, ranges: list) -> bool:
+    return any(a <= start and end <= b for a, b, *_ in ranges)
+
+
+def _invented_passages(text: str, runs: list, kind: str = "invented_text",
+                       keys: tuple = ("invented_text", "invented_text_repeated")) -> list:
+    """One finding per passage; the same passage invented again and again —
+    a model caught in a loop — is one finding that says how many times."""
+    seen: dict = {}
+    order: list = []
+    for a, b, n in runs:
+        key = letters.fold(text[a:b])[0]
+        if key in seen:
+            seen[key][1] += 1
+            continue
+        seen[key] = [(a, b, n), 1]
+        order.append(key)
     findings = []
-    for a, b in uncovered_runs(ref_words, file_words, k, min_run):
-        span = ref_words[a:b]
-        # Running headers and page furniture are left out on purpose.
-        if sum(1 for w in span if w in removed_words) > 0.6 * len(span):
-            continue
-        # Against a text layer, insist the words are genuinely absent, not just
-        # reordered or re-hyphenated beyond what the sequence test can see.
-        if lost is not None and sum(1 for w in span if lost.get(w, 0) > 0) < 0.5 * len(span):
-            continue
-        region = ref.token_region(a)
-        page = next(iter(region), None)
-        box = region.get(page) if page is not None else None
-        # Quote the passage as the PDF writes it, not as lower-cased tokens.
-        quote = ref.text[ref.tokens[a][1]:ref.tokens[min(b, a + 12) - 1][2]]
+    for key in order[:MAX_PASSAGES]:
+        (a, b, n), times = seen[key]
         findings.append(Finding(
-            kind="missing_from_text",
-            severity=HIGH if b - a >= CONFIG["BLOCK_RUN_WORDS"] else MEDIUM,
-            key="missing_from_text", params={"n": b - a,
-                                             "sample": " ".join(quote.split())},
-            page=page, bbox=tuple(box) if box else None,
-            detail=" ".join(span[:50])))
+            kind=kind, severity=HIGH, key=keys[0] if times == 1 else keys[1],
+            params={"n": n, "times": times, "sample": _quote(text, a, b)},
+            char_start=a, char_end=b, detail=text[a:b][:400]))
+    return findings
+
+
+def _unfound_rows(text: str, known: set, pdf_letters: str,
+                  invented: list) -> tuple:
+    """Table rows of the text whose cells are not in the PDF's text at all.
+
+    Most often the PDF prints that table as a picture: the text was read from
+    the picture, and nothing in the PDF's text can confirm or contradict it.
+    Reported once per table, not once per number in it.
+    """
+    rows = []
+    pos = 0
+    for line in text.split("\n"):
+        start, pos = pos, pos + len(line) + 1
+        if "\t" not in line and "|" not in line:
+            continue
+        cells = [c for c in re.split(r"[\t|]", line) if letters.fold(c)[0]]
+        if len(cells) < 2:
+            continue
+        unfound = sum(1 for c in cells
+                      if not letters.found_in(c, known, pdf_letters))
+        if unfound >= max(2, 0.5 * len(cells)):
+            rows.append((start, start + len(line)))
+    groups: list = []
+    for a, b in rows:
+        if _inside(a, b, invented):
+            continue
+        if groups and a - groups[-1][1] <= 2:
+            groups[-1] = (groups[-1][0], b, groups[-1][2] + 1)
+        else:
+            groups.append((a, b, 1))
+    findings = [Finding(kind="unfound_table", severity=MEDIUM, key="unfound_table",
+                        params={"n": n, "sample": _quote(text, a, b, 80)},
+                        char_start=a, char_end=b)
+                for a, b, n in groups[:MAX_PASSAGES]]
+    return findings, [(a, b) for a, b, _ in groups]
+
+
+# Digits joined across the separators numbers are written with, so that
+# "1 000", "1,000" and "1000" are one number, and a number the PDF's text
+# layer glued to its neighbours ("Forestry87,471–481") is still found.
+_DIGIT_RUN_RE = re.compile(r"\d+(?:[.,/'’\s  ]+\d+)*")
+
+
+def _digit_runs(raw_text: str) -> str:
+    return "|".join(re.sub(r"\D", "", m) for m in _DIGIT_RUN_RE.findall(raw_text))
+
+
+def _absent_numbers(text: str, raw_text: str, taken: list, *,
+                    severity: str = HIGH, misread: bool = False) -> list:
+    """Numbers of the text that the PDF does not contain, one finding per line.
+
+    Compared on digits alone, by value rather than by count. Measured on 90
+    files, nine in ten numbers that a stricter comparison reported were in
+    the PDF, written with other spacing or glued to a neighbouring word.
+    Against a scan, `misread` also accepts a number one digit away from one
+    the recogniser read: that digit is far more often its error than the
+    text's.
+    """
+    runs = _digit_runs(letters.ascii_digits(normalise_reference(raw_text)))
+    known = set(runs.split("|"))
+
+    def present(digits: str) -> bool:
+        if digits in runs:
+            return True
+        return misread and len(digits) >= 2 and any(
+            len(r) == len(digits) and sum(x != y for x, y in zip(r, digits)) <= 1
+            for r in known)
+
+    blanked = letters.ascii_digits(
+        _MARKERS_RE.sub(lambda m: " " * len(m.group(0)), text))
+    by_line: dict = {}
+    for m in _NUMBER_RE.finditer(blanked):
+        # A range or a reference ("165-171", "11/41") is checked bound by bound:
+        # the PDF may join them with another dash, or with none.
+        parts = [re.sub(r"\D", "", x) for x in re.split(r"[-/]", m.group(0))]
+        if all(present(x) for x in parts if x) or _inside(m.start(), m.end(), taken):
+            continue
+        line = text.rfind("\n", 0, m.start())
+        by_line.setdefault(line, []).append((text[m.start():m.end()], m.start(), m.end()))
+    findings = []
+    for found in list(by_line.values())[:MAX_PASSAGES]:
+        values = ", ".join(dict.fromkeys(v for v, _, _ in found[:8]))
+        findings.append(Finding(
+            kind="invented_numbers", severity=severity,
+            key="invented_number" if len(found) == 1 else "invented_numbers_line",
+            params={"value": values, "n": len(found)},
+            char_start=found[0][1], char_end=found[-1][2]))
+    return findings
+
+
+REPEAT_MIN_LETTERS = 40
+
+
+def _repeated_passages(text: str, pdf_letters: str) -> list:
+    """Lines the text holds more often than the PDF does: every extra copy."""
+    occurrences: dict = {}
+    for offset, chunk in letters.cells(text):
+        key = letters.fold(chunk)[0]
+        if len(key) >= REPEAT_MIN_LETTERS:
+            occurrences.setdefault(key, []).append((offset, offset + len(chunk)))
+    findings = []
+    for key, where in occurrences.items():
+        if len(where) < 2:
+            continue
+        in_pdf = pdf_letters.count(key)
+        if in_pdf == 0 or len(where) <= in_pdf:
+            continue                      # not in the PDF at all: reported as invented
+        for a, b in where[in_pdf:]:
+            findings.append((a, b, len(where), in_pdf))
+    # The lines of one repeated paragraph are one finding, not one per line.
+    findings.sort()
+    merged: list = []
+    for a, b, times, in_pdf in findings:
+        if merged and a - merged[-1][1] <= 3:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b, times, in_pdf])
+    return [Finding(kind="duplicated_words", severity=MEDIUM, key="repeated_passage",
+                    params={"times": times, "in_pdf": in_pdf,
+                            "sample": _quote(text, a, b, 80)},
+                    char_start=a, char_end=b)
+            for a, b, times, in_pdf in merged[:MAX_PASSAGES]]
+
+
+def _deletions(word: str) -> set:
+    return {word[:i] + word[i + 1:] for i in range(len(word))}
+
+
+def _spelling_variants(text: str, raw_text: str, pdf_letters: str,
+                       taken: list) -> list:
+    """Words written slightly differently from the PDF: one letter wrong,
+    missing, added, or two letters swapped. Real, and nearly always harmless."""
+    pdf_words: dict = {}
+    for w in re.findall(r"[^\W\d_]+", normalise_reference(raw_text)):
+        folded = letters.fold(w)[0]
+        if len(folded) >= 4:
+            pdf_words.setdefault(folded, w)
+    index: dict = {}
+    for folded in pdf_words:
+        index.setdefault(folded, folded)
+        for d in _deletions(folded):
+            index.setdefault(d, folded)
+    findings = []
+    for m in re.finditer(r"[^\W\d_]+", unicodedata.normalize("NFC", text)):
+        folded = letters.fold(m.group(0))[0]
+        if len(folded) < 4 or folded in pdf_letters or _inside(m.start(), m.end(), taken):
+            continue
+        near = index.get(folded) or next(
+            (index[d] for d in _deletions(folded) if d in index), None)
+        if near is None:
+            continue
+        findings.append(Finding(
+            kind="spelling_variants", severity=LOW, key="spelling_variant",
+            params={"word": m.group(0), "pdf": pdf_words[near]},
+            char_start=m.start(), char_end=m.end()))
         if len(findings) >= MAX_PASSAGES:
             break
     return findings
 
 
+MISSING_MIN_LETTERS = 60
+
+
+def _missing_text(text: str, ref: Reference, pages: list,
+                  size: int = letters.SHINGLE) -> list:
+    """Passages of the PDF with no counterpart in the text, outlined on the page.
+
+    Footnotes and text printed sideways in the margin (licences, journal
+    references) are left out: the team leaves them out of the text on purpose.
+    """
+    known = letters.shingles(text, size=size)
+    if not known:
+        return []
+    skip = _set_aside(ref, pages)
+    findings = []
+    for a, b, n in letters.unmatched(ref.text, known, size=size,
+                                     min_run=MISSING_MIN_LETTERS):
+        overlap = sum(max(0, min(b, y) - max(a, x)) for x, y in skip)
+        if overlap > 0.5 * (b - a):
+            continue
+        region = ref.region_between(a, b)
+        page = min(region) if region else None
+        box = region.get(page) if page is not None else None
+        findings.append(Finding(
+            kind="missing_from_text", severity=MEDIUM, key="missing_from_text",
+            params={"n": n, "sample": _quote(ref.text, a, b)},
+            page=page, bbox=tuple(box) if box else None,
+            detail=ref.text[a:b][:400]))
+        if len(findings) >= MAX_PASSAGES:
+            break
+    return findings
+
+
+def _unscramble(findings: list, text: str, pdf_letters: str) -> list:
+    """Drop "scrambled" words that the PDF itself contains.
+
+    Read alone, a name such as "LexUriServ", "SafeSeaNet" or "TaKaRa" looks
+    like two lines woven together. On the team's files every scrambled-text
+    finding was one of these. Text scrambled by a bad reading is not in the
+    PDF's own text, so the PDF settles it.
+    """
+    from .scramble import locate as locate_tokens
+    out = []
+    for f in findings:
+        if f.kind != "scrambled_text":
+            out.append(f)
+            continue
+        words = [w for w in f.detail.split()
+                 if letters.fold(w)[0] not in pdf_letters]
+        if not words:
+            continue
+        hits = locate_tokens(text, words)
+        out.append(Finding(
+            kind=f.kind, severity=HIGH if len(words) >= 2 else MEDIUM, key=f.key,
+            params={"n": len(words), "sample": ", ".join(dict.fromkeys(words[:6]))},
+            char_start=hits[0][1] if hits else None,
+            char_end=hits[0][2] if hits else None, detail=" ".join(words)))
+    return out
+
+
+def _set_aside(ref: Reference, pages: list) -> list:
+    """Character ranges of the PDF reading that are footnotes or margin text.
+
+    A footnote is recognised by where it is and how it is set: smaller than
+    the body text and below its last line. Margin text is set sideways, so
+    its lines are much taller than they are wide.
+    """
+    from statistics import median
+    heights = {p.get("page"): p.get("height") for p in pages}
+    by_page: dict = {}
+    for sp in ref.spans:
+        box = sp.get("bbox")
+        if box and sp.get("char_end", 0) > sp.get("char_start", 0):
+            by_page.setdefault(sp.get("page"), []).append(sp)
+    out = []
+    for page, spans in by_page.items():
+        flat = []
+        for sp in spans:
+            x0, top, x1, bottom = sp["bbox"]
+            if bottom - top > 2.5 * max(x1 - x0, 1):
+                out.append((sp["char_start"], sp["char_end"]))
+            else:
+                flat.append(sp)
+        if len(flat) < 4:
+            continue
+        body = median(sp["bbox"][3] - sp["bbox"][1] for sp in flat)
+        normal = [sp for sp in flat if sp["bbox"][3] - sp["bbox"][1] >= 0.9 * body]
+        if not normal:
+            continue
+        floor = max(sp["bbox"][3] for sp in normal)
+        half = 0.5 * (heights.get(page) or 0)
+        for sp in flat:
+            top, bottom = sp["bbox"][1], sp["bbox"][3]
+            if bottom - top < 0.9 * body and top >= floor - 1 and top > half:
+                out.append((sp["char_start"], sp["char_end"]))
+    return out
+
+
+# A recogniser misreads a letter every few words, so against a scan the
+# sequences looked up are shorter and a passage must be longer to count.
+SCAN_SHINGLE = 8
+SCAN_MIN_LETTERS = 40
+
+
 def recognised_findings(text: str, ref: Reference, removed: str,
                         pages: list) -> list:
-    """Comparison against a recognised scan: passages, not single words."""
-    findings: list = []
-    tokens = tokens_with_spans(text)
-    file_words = [t for t, _, _ in tokens]
-    ref_words = [t for t, _, _ in ref.tokens]
-    if not ref_words:
-        return findings
-    runs = uncovered_runs(file_words, ref_words, 3, SCAN_MIN_RUN)
-    covered = 1.0 - sum(b - a for a, b in runs) / max(len(file_words), 1)
-    if covered < 0.6:
-        findings.append(Finding(kind="scan_mismatch", severity=HIGH,
-                                key="scan_mismatch", params={"pct": covered}))
-    for a, b in runs[:MAX_PASSAGES]:
-        findings.append(_passage(tokens, list(range(a, b)), "not_in_scan", HIGH))
-    findings += _missing_passages(text, ref, removed, min_run=20)
+    """Comparison against a recognised scan, as sequences of letters.
 
-    ref_numbers = set(_NUMBER_RE.findall(ref.text))
-    blanked = _MARKERS_RE.sub(lambda m: " " * len(m.group(0)), text)
-    odd = []
-    for m in _NUMBER_RE.finditer(blanked):
-        v = m.group(0)
-        if len(v) < 2 or v in ref_numbers:
-            continue
-        near = any(len(r) == len(v) and sum(x != y for x, y in zip(r, v)) <= 1
-                   for r in ref_numbers)
-        if not near:
-            odd.append((v, m.start(), m.end()))
-    if odd:
-        findings.append(Finding(
-            kind="invented_numbers", severity=MEDIUM, key="invented_numbers",
-            params={"n": len(odd), "sample": ", ".join(dict.fromkeys(v for v, _, _ in odd[:8]))},
-            char_start=odd[0][1], char_end=odd[0][2]))
+    On the team's scans, comparing word sequences reported 79 passages in a
+    54-page file the reviewer accepted; comparing letters reports none, while
+    a passage that is not in the scan at all still leaves a long gap.
+    """
+    known = letters.shingles(ref.text, size=SCAN_SHINGLE)
+    total = len(letters.fold(text)[0])
+    if not known or not total:
+        return []
+    runs = letters.unmatched(text, known, size=SCAN_SHINGLE,
+                             min_run=SCAN_MIN_LETTERS)
+    covered = 1.0 - sum(n for _, _, n in runs) / total
+    if covered < 0.6:
+        # The text and the reading disagree almost everywhere: the scan was
+        # read in the wrong language, or is not this document. One finding
+        # says so; a hundred passages would bury it.
+        return [Finding(kind="scan_mismatch", severity=HIGH, key="scan_mismatch",
+                        params={"pct": covered})]
+    findings = _invented_passages(text, runs, kind="not_in_scan",
+                                  keys=("not_in_scan_passage", "not_in_scan_repeated"))
+    findings += _missing_text(text, ref, pages, size=SCAN_SHINGLE)
+
+    findings += _absent_numbers(text, ref.text, runs, severity=MEDIUM, misread=True)
     return findings
 
 
@@ -370,6 +560,8 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
                       log=lambda *a, **k: None)
         pages = [p.to_dict() for p in res.pages]
         recognised = any(p["source"] != "extracted" for p in pages)
+        findings = _unscramble(findings, text, letters.fold(
+            letters.decode_cids(res.raw_text + " " + res.text, text))[0])
         usable_ref = alnum_count(res.text) >= 0.2 * max(alnum_count(text), 1)
         unread = res.stats.get("scanned") or []
 
@@ -406,7 +598,8 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
                         key="ocr_low_confidence", params={"pct": mean_conf}))
             else:
                 reference = REF_TEXT_LAYER
-                found = exact_findings(text, res.raw_text, res.dropped_text, ref)
+                found = exact_findings(text, res.raw_text, res.dropped_text, ref,
+                                       pages)
             findings += found
 
     # Place every text-located finding on its page. A passage with no
@@ -487,4 +680,5 @@ def quick_verdict(txt_path: Path, config: dict | None = None) -> dict:
     severities = {f.severity for f in findings}
     return {"verdict": "reject" if HIGH in severities else
                        ("review" if findings else "ok"),
-            "kinds": sorted({f.kind for f in findings})}
+            "kinds": sorted({f.kind for f in findings}),
+            "severities": worst_by_kind([f.to_dict() for f in findings])}

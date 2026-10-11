@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import sidecar
+from .qa import categories
 from .review_store import LocalStore
 
 FIELDS = ["file", "made_by", "tool_verdict", "checked_against", "problems",
@@ -40,8 +41,13 @@ def _checked_against(record: dict) -> str:
     return "text_layer" if sources else "none"
 
 
-def collect(folder: Path, store: LocalStore | None = None) -> list:
-    """One row per .txt file in a folder."""
+def collect(folder: Path, store: LocalStore | None = None,
+            hidden: frozenset = frozenset()) -> list:
+    """One row per .txt file in a folder.
+
+    `hidden` holds the kinds of problem the reviewer chose not to look for:
+    the summary reports the verdict as the list showed it.
+    """
     folder = Path(folder)
     store = store or LocalStore(folder)
     triage = store.triage()
@@ -53,13 +59,17 @@ def collect(folder: Path, store: LocalStore | None = None) -> list:
         if record is None:
             record = store.any_check(txt.name) or {}
             decision = store.decision(txt.name)
-        assessment = record.get("assessment", {})
-        problems = sorted({f.get("kind", "") for f in assessment.get("findings", [])})
-        verdict = assessment.get("verdict", "")
+        found = categories.visible(record.get("assessment", {}).get("findings"), hidden)
+        problems = sorted({f.get("kind", "") for f in found})
+        verdict = categories.verdict_for(record.get("assessment"), hidden) \
+            if record else ""
         if not record:
             known = triage.get(txt.name) or {}
-            verdict = known.get("verdict", "")
-            problems = sorted(known.get("kinds", []))
+            severities = {k: v for k, v in (known.get("severities") or {}).items()
+                          if k not in hidden}
+            verdict = categories.verdict_from_severities(severities, frozenset()) \
+                if known.get("verdict") else ""
+            problems = sorted(severities)
         rows.append({
             "file": txt.name,
             "made_by": made_by,

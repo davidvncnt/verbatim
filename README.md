@@ -62,7 +62,10 @@ surligné : on compare un paragraphe, pas un document entier.
 
 **Vérifier des fichiers texte existants.** L'onglet *Vérifier* fonctionne aussi
 avec des fichiers `.txt` produits par d'autres outils. verbatim relit alors le
-PDF correspondant et compare le texte avec lui. Si le PDF est une numérisation,
+PDF correspondant et compare le texte avec lui, lettre par lettre plutôt que mot
+par mot : une espace manquante, un accent perdu, une apostrophe mal encodée ou
+une faute de frappe ne sont pas pris pour du texte inventé, alors qu'une phrase
+absente du PDF l'est. Si le PDF est une numérisation,
 Tesseract — un lecteur de caractères gratuit et local — en fait une lecture
 indépendante, qui sert à repérer les passages du texte qui n'existent nulle part
 dans la numérisation. Quand la numérisation est trop abîmée pour être lue de
@@ -359,26 +362,50 @@ gardez les PDF à côté : l'onglet *Vérifier* en a besoin.
    La première fois qu'un grand dossier est ouvert, verbatim le lit en arrière-plan
    pour le trier (quelques minutes pour 20 000 fichiers). Il s'en souvient
    ensuite.
-4. **Afficher** ne garde qu'un type de problème à la fois (mots absents du PDF,
-   mots brouillés, caractères mal décodés…) : une série de fichiers qui ont le
-   même défaut se juge bien plus vite qu'une série de fichiers sans rapport.
-5. Cliquez sur un fichier. S'il n'a pas été converti par verbatim, il est vérifié
+4. **Afficher** ne garde qu'un type de problème à la fois (texte absent du PDF,
+   nombres, texte répété…) : une série de fichiers qui ont le même défaut se
+   juge bien plus vite qu'une série de fichiers sans rapport.
+5. Pour vérifier tout le dossier d'avance, cliquez sur **Analyser** sous la
+   liste, avec *tous les fichiers* ou seulement *les 25, 100 ou 500 suivants*.
+   Une barre de progression indique l'avancement et le temps restant ; les
+   fichiers analysés passent en tête de liste. Vous pouvez continuer à
+   travailler pendant ce temps.
+6. Cliquez sur un fichier. S'il n'a pas été converti par verbatim, il est vérifié
    à ce moment-là : quelques secondes pour un PDF ordinaire, plus longtemps pour
    une numérisation, qui doit d'abord être lue par Tesseract. Une barre de
    progression indique l'avancement, et le résultat est conservé.
-6. Cliquez sur un problème dans **À examiner**. La page s'affiche à gauche avec
+7. Cliquez sur un problème dans **À examiner**. La page s'affiche à gauche avec
    le passage entouré ; le même passage est surligné dans le texte à droite.
+   Pour un passage *du PDF absent du texte*, seul l'encadré sur la page existe :
+   le passage n'est pas dans le texte, il ne peut donc pas y être surligné.
    Un fond **mauve** signale des mots produits par un modèle : vérifiez-les
    tous.
-7. Inscrivez votre nom dans **Vérifié par** (il est retenu pour la prochaine
+8. Inscrivez votre nom dans **Vérifié par** (il est retenu pour la prochaine
    fois) et, si utile, une **Remarque**.
-8. Cliquez sur **Accepter**, **À retravailler** ou **Rejeter**. Le fichier
+9. Cliquez sur **Accepter**, **À retravailler** ou **Rejeter**. Le fichier
    suivant s'ouvre. La liste garde la trace de votre décision : ☑ accepté,
    ⊙ à retravailler, ☒ rejeté.
 
 Dans l'aperçu du PDF, déplacez-vous avec deux doigts sur le pavé tactile, ou en
 faisant glisser la page directement. Deux doigts vers le côté, en maintenant
 **Maj**, déplacent la page horizontalement.
+
+**Choisir les problèmes à rechercher.** Le bouton **Types de problèmes…**
+ouvre la liste des problèmes que verbatim sait repérer. Pour chacun, il montre un
+exemple, explique comment il est détecté et quand il donne de fausses alertes.
+Décochez ceux qui ne vous concernent pas : ils ne sont plus affichés et ne
+colorent plus les fichiers dans la liste. Rien n'est revérifié, et une ligne
+grise indique combien de signalements sont masqués. Par défaut, trois types sont
+décochés :
+
+- **Erreurs d'encodage** (« lâ€™Organisation ») : réelles, mais mécaniques, et
+  elles se corrigent toutes à la fois plutôt que fichier par fichier ;
+- **Petites différences d'orthographe** (« Starmmer » pour « Starmer ») :
+  presque toujours sans conséquence, et souvent dues au PDF lui-même ;
+- **Texte du PDF absent du TXT** : très fréquent quand les textes ont été
+  raccourcis volontairement (autre décision du même PDF, annexe, page de
+  couverture). Les notes de bas de page et le texte imprimé dans les marges
+  sont de toute façon ignorés.
 
 **Sans les PDF.** Cochez **Vérifier le texte seulement (sans PDF)** pour ne
 faire que les contrôles qui n'ont pas besoin du PDF : texte répété en boucle,

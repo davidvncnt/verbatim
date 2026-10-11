@@ -33,7 +33,7 @@ from tkinter import filedialog, ttk
 
 from .. import i18n, sidecar
 from ..pipeline import Stopped
-from ..qa import external
+from ..qa import categories, external
 from ..qa.config import CONFIG
 from ..review_store import LocalStore, summarise, text_stamp
 from ..settings import load_prefs, save_prefs
@@ -85,6 +85,13 @@ COMPLEX_FONTS = ("Geeza Pro", "Arial Unicode MS", "Noto Naskh Arabic",
                  "Segoe UI", "Tahoma")
 
 
+class View:
+    """What the reviewer has chosen to look for, shared by every file."""
+
+    def __init__(self, hidden: frozenset = frozenset()):
+        self.hidden = hidden
+
+
 @dataclass
 class Entry:
     """One .txt in the queue."""
@@ -93,18 +100,38 @@ class Entry:
     kind: str                     # "verbatim": has its own record beside it
     record: dict | None = None    # the full check, once there is one
     triage: str = "unknown"       # quick text-only verdict, for ordering
-    kinds: list = field(default_factory=list)   # kinds of problem found
+    # {kind of problem: worst severity} from the quick sort
+    severities: dict = field(default_factory=dict)
     # What the last full check found, without the check itself: enough to
     # colour the row. The full check is read from disk when the file is opened.
     summary: dict | None = None
+    view: View | None = None
+
+    @property
+    def hidden(self) -> frozenset:
+        return self.view.hidden if self.view is not None else frozenset()
+
+    @property
+    def findings(self) -> list:
+        """The full check's findings that the reviewer has chosen to see."""
+        if self.record is None:
+            return []
+        return categories.visible(
+            self.record.get("assessment", {}).get("findings"), self.hidden)
 
     @property
     def verdict(self) -> str:
+        """Counting only the kinds of problem the reviewer looks for."""
         if self.record is not None:
-            return self.record.get("assessment", {}).get("verdict", "unknown")
+            return categories.verdict_for(self.record.get("assessment"), self.hidden)
         if self.summary is not None:
-            return self.summary.get("verdict", "unknown")
-        return self.triage
+            severities = self.summary.get("severities") or {}
+            if not set(severities) & self.hidden and self.summary.get("verdict"):
+                return self.summary["verdict"]
+            return categories.verdict_from_severities(severities, self.hidden)
+        if self.triage == "unknown":
+            return "unknown"
+        return categories.verdict_from_severities(self.severities, self.hidden)
 
     @property
     def analysed(self) -> bool:
@@ -114,14 +141,14 @@ class Entry:
 
     @property
     def problems(self) -> list:
-        """Kinds of problem found, from the full check when there is one."""
+        """Kinds of problem found and shown, from the full check if any."""
         if self.record is not None:
-            return sorted({f.get("kind", "")
-                           for f in self.record.get("assessment", {}).get("findings", [])
-                           if f.get("kind")})
-        if self.summary is not None:
-            return list(self.summary.get("kinds", []))
-        return list(self.kinds)
+            kinds = {f.get("kind", "") for f in self.findings}
+        elif self.summary is not None:
+            kinds = set(self.summary.get("severities") or {})
+        else:
+            kinds = set(self.severities)
+        return sorted(k for k in kinds if k and k not in self.hidden)
 
     @property
     def compared(self) -> bool:
@@ -161,6 +188,10 @@ class ReviewTab(ttk.Frame):
         self.current_finding: dict | None = None
         self.current_entry: Entry | None = None
         self.store: LocalStore | None = None
+        # The kinds of problem the reviewer has chosen to look for. Every check
+        # still runs; this only decides what is shown and what colours a file.
+        self.view = View(categories.hidden_kinds(
+            categories.chosen(load_prefs().get("review_categories"))))
         self._by_name: dict = {}
         self._row_of: dict = {}
         self.shown: list = []
@@ -233,9 +264,14 @@ class ReviewTab(ttk.Frame):
                                                         sticky="ew", padx=8)
         ttk.Label(bar, textvariable=self.v_progress,
                   foreground=MUTED).grid(row=0, column=2, sticky="e", padx=(8, 4))
-        summary = ttk.Button(bar, command=self._show_summary)
+        buttons = ttk.Frame(bar)
+        buttons.grid(row=0, column=3, sticky="e")
+        kinds = ttk.Button(buttons, command=self._choose_categories)
+        self.tr.label(kinds, "review.categories")
+        kinds.pack(side="left", padx=(0, 6))
+        summary = ttk.Button(buttons, command=self._show_summary)
         self.tr.label(summary, "review.summary")
-        summary.grid(row=0, column=3, sticky="e")
+        summary.pack(side="left")
 
         self.tr.label(ttk.Label(bar), "review.pdf_folder").grid(
             row=1, column=0, sticky="e", pady=(4, 0))
@@ -623,14 +659,16 @@ class ReviewTab(ttk.Frame):
             if txt.stem + sidecar.SUFFIX in recorded:
                 record = sidecar.read(txt)
                 if record:
-                    entries.append(Entry(txt, "verbatim", record=record))
+                    entries.append(Entry(txt, "verbatim", record=record,
+                                         view=self.view))
                     continue
             known = triage.get(txt.name)
             fresh = known and known.get("stamp") == text_stamp(txt)
             entries.append(Entry(
                 txt, "external",
                 triage=known.get("verdict", "unknown") if fresh else "unknown",
-                kinds=list(known.get("kinds", [])) if fresh else []))
+                severities=dict(known.get("severities") or {}) if fresh else {},
+                view=self.view))
         self._attach_checks(entries)
 
         self.entries = sorted(entries, key=self._sort_key)
@@ -706,12 +744,12 @@ class ReviewTab(ttk.Frame):
                 try:
                     quick = external.quick_verdict(txt)
                 except Exception:
-                    quick = {"verdict": "unknown", "kinds": []}
+                    quick = {"verdict": "unknown", "severities": {}}
                 saved[txt.name] = {"stamp": text_stamp(txt),
                                    "verdict": quick["verdict"],
-                                   "kinds": quick.get("kinds", [])}
+                                   "severities": quick.get("severities", {})}
                 self._results.put(("triaged", gen, txt.name, quick["verdict"],
-                                   quick.get("kinds", []), n, len(todo)))
+                                   quick.get("severities", {}), n, len(todo)))
                 if n % 25 == 0:
                     # Hand the processor back for a moment: this loop competes
                     # with the window for it, and a folder of several thousand
@@ -878,7 +916,7 @@ class ReviewTab(ttk.Frame):
         self._set_decision_enabled(True)
         self._shade_recognised()
         self._fill_findings()
-        found = record.get("assessment", {}).get("findings") or []
+        found = self._visible_findings()
         if not record.get("pages"):
             self._show_notice(record)
             return
@@ -1154,12 +1192,12 @@ class ReviewTab(ttk.Frame):
                 break
             kind = msg[0]
             if kind == "triaged":
-                _, gen, name, verdict, kinds, n, total = msg
+                _, gen, name, verdict, severities, n, total = msg
                 if gen != self._folder_gen:
                     continue
                 entry = self._by_name.get(name)
                 if entry is not None:
-                    entry.kinds = kinds
+                    entry.severities = severities
                     if entry.triage != verdict:
                         entry.triage = verdict
                         self._dirty.add(name)
@@ -1288,15 +1326,22 @@ class ReviewTab(ttk.Frame):
                               f"1.0+{span['char_start']}c",
                               f"1.0+{span['char_end']}c")
 
+    def _visible_findings(self) -> list:
+        """The open file's findings of the kinds the reviewer looks for."""
+        return categories.visible(
+            (self.current or {}).get("assessment", {}).get("findings"),
+            self.view.hidden)
+
     def _fill_findings(self):
         self.findings.delete(0, "end")
-        found = (self.current or {}).get("assessment", {}).get("findings") or []
+        everything = (self.current or {}).get("assessment", {}).get("findings") or []
+        found = self._visible_findings()
+        hidden = len(everything) - len(found)
         if not found:
             unchecked = (self.current or {}).get("reference") == "none"
             self.findings.insert("end", "  " + i18n.t(
                 "review.no_findings_text_only" if unchecked else "review.no_findings"))
             self.findings.itemconfigure(0, foreground=MUTED)
-            return
         lang = i18n.language()
         for f in found:
             message = f.get(f"message_{lang}") or f.get("message_en") or f["kind"]
@@ -1306,10 +1351,16 @@ class ReviewTab(ttk.Frame):
             self.findings.itemconfigure(
                 self.findings.size() - 1,
                 foreground=SEVERITY_COLOUR.get(f.get("severity"), MUTED))
+        if hidden:
+            # Said, not silently dropped: a reviewer who forgot a choice made
+            # last week should see that something is being left out.
+            self.findings.insert("end", "  " + i18n.t("review.hidden_findings",
+                                                       n=i18n.number(hidden)))
+            self.findings.itemconfigure(self.findings.size() - 1, foreground=MUTED)
 
     def _finding_chosen(self, _event=None):
         sel = self.findings.curselection()
-        found = (self.current or {}).get("assessment", {}).get("findings") or []
+        found = self._visible_findings()
         if not sel or not found or sel[0] >= len(found):
             return
         finding = found[sel[0]]
@@ -1472,6 +1523,97 @@ class ReviewTab(ttk.Frame):
 
     # -- the summary ------------------------------------------------------
 
+    # -- what to look for -------------------------------------------------
+
+    def _choose_categories(self):
+        """Which kinds of problem to look for, each with an example, how it is
+        found and when it raises false alarms: a reviewer who knows why a
+        check misfires can judge its findings instead of distrusting them all."""
+        window = getattr(self, "_categories_window", None)
+        if window is not None and window.winfo_exists():
+            window.lift()
+            return
+        window = tk.Toplevel(self)
+        self._categories_window = window
+        window.title(i18n.t("categories.title"))
+        window.transient(self.winfo_toplevel())
+        window.columnconfigure(1, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        ttk.Label(window, text=i18n.t("categories.intro"), wraplength=760,
+                  justify="left").grid(row=0, column=0, columnspan=2, sticky="w",
+                                       padx=12, pady=(12, 8))
+        left = ttk.Frame(window)
+        left.grid(row=1, column=0, sticky="nw", padx=(12, 8))
+        details = tk.Text(window, width=58, height=18, wrap="word",
+                          relief="flat", background=self._text_background(),
+                          font="TkDefaultFont", padx=10, pady=8, cursor="arrow")
+        details.grid(row=1, column=1, sticky="nsew", padx=(0, 12))
+        details.tag_configure("title", font=("TkDefaultFont", 13, "bold"),
+                              spacing3=6)
+        details.tag_configure("head", font=("TkDefaultFont", 11, "bold"),
+                              spacing1=8, spacing3=2)
+
+        on = categories.chosen(load_prefs().get("review_categories"))
+        flags = {c.id: tk.BooleanVar(value=c.id in on) for c in categories.CATEGORIES}
+
+        def describe(cat_id):
+            details.configure(state="normal")
+            details.delete("1.0", "end")
+            details.insert("end", i18n.t(f"cat.{cat_id}.title") + "\n", "title")
+            for part, key in (("example", "categories.example"),
+                              ("how", "categories.how"),
+                              ("false", "categories.false")):
+                details.insert("end", i18n.t(key) + "\n", "head")
+                details.insert("end", i18n.t(f"cat.{cat_id}.{part}") + "\n")
+            details.configure(state="disabled")
+
+        def changed():
+            self._categories_changed({k for k, v in flags.items() if v.get()})
+
+        for i, cat in enumerate(categories.CATEGORIES):
+            box = ttk.Checkbutton(left, text=i18n.t(f"cat.{cat.id}.title"),
+                                  variable=flags[cat.id],
+                                  command=lambda c=cat.id: (describe(c), changed()))
+            box.grid(row=i, column=0, sticky="w", pady=2)
+            for event in ("<Enter>", "<FocusIn>"):
+                box.bind(event, lambda _e, c=cat.id: describe(c))
+
+        def restore():
+            for cat in categories.CATEGORIES:
+                flags[cat.id].set(cat.default)
+            changed()
+
+        bottom = ttk.Frame(window)
+        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=12)
+        bottom.columnconfigure(0, weight=1)
+        ttk.Button(bottom, text=i18n.t("categories.defaults"),
+                   command=restore).grid(row=0, column=0, sticky="w")
+        ttk.Button(bottom, text=i18n.t("categories.close"),
+                   command=window.destroy).grid(row=0, column=1, sticky="e")
+        describe(categories.CATEGORIES[0].id)
+        self._category_flags = flags          # for the tests
+
+    def _text_background(self) -> str:
+        try:
+            return self.winfo_toplevel().cget("background")
+        except tk.TclError:
+            return "#f4f4f4"
+
+    def _categories_changed(self, on: set):
+        prefs = load_prefs()
+        prefs["review_categories"] = {c.id: c.id in on for c in categories.CATEGORIES}
+        save_prefs(prefs)
+        self.view.hidden = categories.hidden_kinds(on)
+        self._resort()
+        if self.current is not None:
+            self._fill_findings()
+            found = self._visible_findings()
+            if found:
+                self.findings.selection_clear(0, "end")
+                self.findings.selection_set(0)
+                self._finding_chosen()
+
     def _show_summary(self):
         """What came of this folder: read-only, and exportable.
 
@@ -1484,7 +1626,7 @@ class ReviewTab(ttk.Frame):
         from ..summary import collect, counts, write_csv
         if self.folder is None:
             return
-        rows = collect(self.folder, self.store)
+        rows = collect(self.folder, self.store, self.view.hidden)
         totals = counts(rows)
 
         window = tk.Toplevel(self)

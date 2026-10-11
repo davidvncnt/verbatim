@@ -40,7 +40,8 @@ def test_every_string_formats_without_error(lang):
     sample = {"n": 3, "sample": "a, b", "pct": 0.87, "pages": 4, "tables": 1,
               "dropped": 2, "done": 5, "total": 9, "name": "f.txt", "path": "/tmp",
               "note": "x", "error": "boom", "who": "RA1", "verdict": "ok",
-              "page": 2, "version": "5.4.0", "flagged": 2, "pdf": "x.pdf", "left": 4, "value": "1"}
+              "page": 2, "version": "5.4.0", "flagged": 2, "pdf": "x.pdf", "left": 4, "value": "1",
+              "times": 3, "in_pdf": 1, "word": "x"}
     for key in i18n.CATALOGUES[lang]:
         out = i18n.t(key, lang, **sample)
         assert "{" not in out, f"{lang}:{key} left an unfilled placeholder: {out}"
