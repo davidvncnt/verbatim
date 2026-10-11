@@ -333,6 +333,12 @@ class ReviewTab(ttk.Frame):
         bar.grid(row=1, column=1, sticky="ns")
         self.queue.configure(yscrollcommand=bar.set)
         self.queue.bind("<<ListboxSelect>>", self._file_chosen)
+        # File names are copied into spreadsheets to keep track of what to
+        # come back to: the usual shortcut, and a menu on a right click.
+        for seq in ("<Command-c>", "<Control-c>"):
+            self.queue.bind(seq, lambda _e: self._copy_names(self._selected_entries()))
+        for seq in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
+            self.queue.bind(seq, self._queue_menu)
 
         # Run the full check on many files at once, so that the colours in the
         # list mean something before each file is opened.
@@ -346,6 +352,37 @@ class ReviewTab(ttk.Frame):
         self.batch_size.bind("<<ComboboxSelected>>", self._batch_size_chosen)
         self._label_batch()
         self.tr.callback(self._label_batch)
+
+    def _selected_entries(self) -> list:
+        return [self.shown[i] for i in self.queue.curselection() if i < len(self.shown)]
+
+    def _copy_names(self, entries: list):
+        """Put file names on the clipboard, one per line, as a spreadsheet
+        pastes them into one cell each."""
+        if not entries:
+            return "break"
+        names = "\n".join(e.txt.name for e in entries)
+        self.clipboard_clear()
+        self.clipboard_append(names)
+        what = entries[0].txt.name if len(entries) == 1 else \
+            i18n.t("review.copied_n", n=i18n.number(len(entries)))
+        self.v_status.set(i18n.t("review.copied", name=what))
+        return "break"
+
+    def _queue_menu(self, event):
+        i = self.queue.nearest(event.y)
+        if not self.shown or i >= len(self.shown):
+            return "break"
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(label=i18n.t("review.copy_name", name=self.shown[i].txt.name),
+                         command=lambda: self._copy_names([self.shown[i]]))
+        menu.add_command(label=i18n.t("review.copy_names", n=i18n.number(len(self.shown))),
+                         command=lambda: self._copy_names(list(self.shown)))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _label_batch(self):
         self.batch_button.configure(text=i18n.t(

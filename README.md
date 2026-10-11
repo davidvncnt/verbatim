@@ -362,6 +362,10 @@ gardez les PDF à côté : l'onglet *Vérifier* en a besoin.
    La première fois qu'un grand dossier est ouvert, verbatim le lit en arrière-plan
    pour le trier (quelques minutes pour 20 000 fichiers). Il s'en souvient
    ensuite.
+
+   Pour noter un fichier à revoir, sélectionnez-le et faites **⌘ C** (Mac) ou
+   **Ctrl C** (Windows), puis collez le nom dans un tableur. Un clic droit dans
+   la liste permet aussi de copier tous les noms affichés, un par ligne.
 4. **Afficher** ne garde qu'un type de problème à la fois (texte absent du PDF,
    nombres, texte répété…) : une série de fichiers qui ont le même défaut se
    juge bien plus vite qu'une série de fichiers sans rapport.
@@ -393,6 +397,10 @@ faisant glisser la page directement. Deux doigts vers le côté, en maintenant
 **Choisir les problèmes à rechercher.** Le bouton **Types de problèmes…**
 ouvre la liste des problèmes que verbatim sait repérer. Pour chacun, il montre un
 exemple, explique comment il est détecté et quand il donne de fausses alertes.
+Parmi eux, **Pages imprimées à l'horizontale** signale les tableaux tournés pour
+tenir dans une page portrait : les anciennes conversions les ont souvent
+abîmés, parfois sans qu'une seule valeur manque (valeurs dans la mauvaise ligne
+ou colonne). La page est donc signalée même quand rien d'autre n'y est trouvé.
 Décochez ceux qui ne vous concernent pas : ils ne sont plus affichés et ne
 colorent plus les fichiers dans la liste. Rien n'est revérifié, et une ligne
 grise indique combien de signalements sont masqués. Par défaut, trois types sont

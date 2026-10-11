@@ -805,3 +805,20 @@ def test_the_choice_of_problems_is_remembered(app, corpus):
     finally:
         tab._categories_changed(categories.chosen(None))
     assert "missing_from_text" in tab.view.hidden
+
+
+def test_file_names_can_be_copied_from_the_list(app, corpus):
+    """To paste into a spreadsheet the files to come back to."""
+    txt, pdfs = corpus
+    tab = app.review_tab
+    tab.v_pdf_folder.set(str(pdfs))
+    tab.load(txt)
+    app.update()
+    first = tab.shown[0].txt.name
+    tab.queue.selection_clear(0, "end")
+    tab.queue.selection_set(0)
+    tab._copy_names(tab._selected_entries())
+    assert app.clipboard_get() == first
+    assert first in tab.v_status.get()
+    tab._copy_names(list(tab.shown))
+    assert app.clipboard_get().split("\n") == [e.txt.name for e in tab.shown]

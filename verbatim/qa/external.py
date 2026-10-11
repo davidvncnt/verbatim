@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -167,14 +168,14 @@ def _group(positions: list, gap: int) -> list:
 
 
 def exact_findings(text: str, raw_text: str, removed: str, ref: Reference,
-                   pages: list | None = None) -> list:
+                   pages: list | None = None, pictures: str = "") -> list:
     """Comparison against a PDF text layer, as sequences of letters.
 
     See qa.letters for why the comparison is not word by word. Each finding
     is placed where it is: a passage of the text at its own characters, a
     passage of the PDF at its own lines on the page.
     """
-    decoded = letters.decode_cids(raw_text, text)
+    decoded = letters.decode_cids(raw_text, text) + "\n" + pictures
     known = letters.shingles(decoded)
     if not known:
         return []
@@ -186,7 +187,7 @@ def exact_findings(text: str, raw_text: str, removed: str, ref: Reference,
     rows, row_ranges = _unfound_rows(text, known, pdf_letters, invented)
     findings += rows
     taken = invented + row_ranges
-    findings += _absent_numbers(text, decoded, taken)
+    findings += _absent_numbers(text, decoded, taken, misread_in=pictures)
     findings += _repeated_passages(text, pdf_letters)
     findings += _spelling_variants(text, decoded, pdf_letters, taken)
     findings += _missing_text(text, ref, pages or [])
@@ -272,7 +273,8 @@ def _digit_runs(raw_text: str) -> str:
 
 
 def _absent_numbers(text: str, raw_text: str, taken: list, *,
-                    severity: str = HIGH, misread: bool = False) -> list:
+                    severity: str = HIGH, misread: bool = False,
+                    misread_in: str = "") -> list:
     """Numbers of the text that the PDF does not contain, one finding per line.
 
     Compared on digits alone, by value rather than by count. Measured on 90
@@ -280,15 +282,17 @@ def _absent_numbers(text: str, raw_text: str, taken: list, *,
     the PDF, written with other spacing or glued to a neighbouring word.
     Against a scan, `misread` also accepts a number one digit away from one
     the recogniser read: that digit is far more often its error than the
-    text's.
+    text's. `misread_in` does the same for one recognised passage only, such
+    as the pictures of a PDF that otherwise has text.
     """
     runs = _digit_runs(letters.ascii_digits(normalise_reference(raw_text)))
-    known = set(runs.split("|"))
+    known = set(runs.split("|")) if misread else set(
+        _digit_runs(letters.ascii_digits(misread_in)).split("|"))
 
     def present(digits: str) -> bool:
         if digits in runs:
             return True
-        return misread and len(digits) >= 2 and any(
+        return len(digits) >= 2 and any(
             len(r) == len(digits) and sum(x != y for x, y in zip(r, digits)) <= 1
             for r in known)
 
@@ -301,10 +305,18 @@ def _absent_numbers(text: str, raw_text: str, taken: list, *,
         parts = [re.sub(r"\D", "", x) for x in re.split(r"[-/]", m.group(0))]
         if all(present(x) for x in parts if x) or _inside(m.start(), m.end(), taken):
             continue
-        line = text.rfind("\n", 0, m.start())
+        line = text.count("\n", 0, m.start())
         by_line.setdefault(line, []).append((text[m.start():m.end()], m.start(), m.end()))
+    # Lines that follow one another are one finding: they are most often one
+    # table, and a table is judged against its page as a whole.
+    groups: list = []
+    for line in sorted(by_line):
+        if groups and line - groups[-1][0] <= 1:
+            groups[-1] = (line, groups[-1][1] + by_line[line])
+        else:
+            groups.append((line, list(by_line[line])))
     findings = []
-    for found in list(by_line.values())[:MAX_PASSAGES]:
+    for _line, found in groups[:MAX_PASSAGES]:
         values = ", ".join(dict.fromkeys(v for v, _, _ in found[:8]))
         findings.append(Finding(
             kind="invented_numbers", severity=severity,
@@ -417,6 +429,48 @@ def _missing_text(text: str, ref: Reference, pages: list,
     return findings
 
 
+def _sideways_pages(turned: list, spans: list) -> list:
+    """One finding per page printed sideways, with the lines of the text that
+    belong to it.
+
+    A table turned to fit a portrait page is where earlier conversions went
+    most wrong, and in a way a comparison of letters cannot see: every value
+    can be present and still sit in the wrong row or column. So the page is
+    pointed out whether or not anything else was found on it.
+    """
+    findings = []
+    for page in turned[:MAX_PASSAGES]:
+        lines = [sp for sp in spans if sp.get("page") == page]
+        findings.append(Finding(
+            kind="sideways_page", severity=MEDIUM, key="sideways_page",
+            params={"page": page}, page=page,
+            char_start=lines[0]["char_start"] if lines else None,
+            char_end=lines[-1]["char_end"] if lines else None))
+    return findings
+
+
+def _unloop(findings: list, text: str, pdf_letters: str) -> list:
+    """Drop a "repetition loop" that the PDF repeats just as often.
+
+    Read alone, a list of vessels where every column says "Not known", or
+    three signatures each followed by "of the Conference of the Parties",
+    looks like a recogniser going round in circles. The PDF settles it: a
+    loop is text the file repeats and the document does not.
+    """
+    if not any(f.kind == "repetition_loop" for f in findings):
+        return findings
+    words = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", text).casefold())
+    n = CONFIG["REPEAT_NGRAM_N"]
+    grams = Counter(tuple(words[i:i + n]) for i in range(len(words) - n + 1))
+    if not grams:
+        return findings
+    gram, in_text = grams.most_common(1)[0]
+    key = letters.fold(" ".join(gram))[0]
+    if pdf_letters.count(key) * 2 < in_text:
+        return findings
+    return [f for f in findings if f.kind != "repetition_loop"]
+
+
 def _unscramble(findings: list, text: str, pdf_letters: str) -> list:
     """Drop "scrambled" words that the PDF itself contains.
 
@@ -480,6 +534,51 @@ def _set_aside(ref: Reference, pages: list) -> list:
             if bottom - top < 0.9 * body and top >= floor - 1 and top > half:
                 out.append((sp["char_start"], sp["char_end"]))
     return out
+
+
+# Findings that text printed as a picture in the PDF would explain.
+PICTURE_KINDS = {"invented_text", "invented_numbers", "unfound_table"}
+PICTURE_MIN_SHARE = 0.04     # of the page's area
+PICTURE_LIMIT = 40           # pictures read per document, at most
+
+
+def read_pictures(pdf_path: Path, settings, progress=None) -> str:
+    """The text of the larger pictures in a PDF that otherwise has text.
+
+    Logos and rules are skipped by size. The reading is used as further
+    evidence of what the document says, never as a source of findings: what
+    is not found in the text layer or in the pictures is still reported.
+    """
+    import pdfplumber
+
+    from ..extract.pdfio import release
+    from ..ocr.tesseract import _copy_with, ocr_tesseract
+    if getattr(settings, "ocr_language", "") == "auto":
+        settings = _copy_with(settings, ocr_language=getattr(
+            settings, "ocr_trial_language", "eng") or "eng")
+    out: list = []
+    with pdfplumber.open(str(pdf_path)) as doc:
+        total = len(doc.pages)
+        for number, page in enumerate(doc.pages, 1):
+            if progress:
+                progress(number - 1, total, "pictures")
+            area = float(page.width * page.height) or 1.0
+            for im in page.images:
+                box = (max(float(im["x0"]), 0.0), max(float(im["top"]), 0.0),
+                       min(float(im["x1"]), float(page.width)),
+                       min(float(im["bottom"]), float(page.height)))
+                w, h = box[2] - box[0], box[3] - box[1]
+                if w < 72 or h < 36 or w * h < PICTURE_MIN_SHARE * area:
+                    continue
+                try:
+                    words, _chars, _conf = ocr_tesseract(page.crop(box), settings)
+                except Exception:
+                    continue
+                out.append(" ".join(word["text"] for word in words))
+                if len(out) >= PICTURE_LIMIT:
+                    return "\n".join(out)
+            release(page)
+    return "\n".join(out)
 
 
 # A recogniser misreads a letter every few words, so against a scan the
@@ -558,10 +657,13 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
                 resolve_languages(settings, log=lambda *a, **k: None)
         res = convert(Path(pdf_path), settings, progress=progress,
                       log=lambda *a, **k: None)
+        can_read_pictures = settings.ocr != "off"
         pages = [p.to_dict() for p in res.pages]
         recognised = any(p["source"] != "extracted" for p in pages)
-        findings = _unscramble(findings, text, letters.fold(
-            letters.decode_cids(res.raw_text + " " + res.text, text))[0])
+        pdf_letters = letters.fold(
+            letters.decode_cids(res.raw_text + " " + res.text, text))[0]
+        findings = _unloop(_unscramble(findings, text, pdf_letters),
+                           text, pdf_letters)
         usable_ref = alnum_count(res.text) >= 0.2 * max(alnum_count(text), 1)
         unread = res.stats.get("scanned") or []
 
@@ -600,7 +702,17 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
                 reference = REF_TEXT_LAYER
                 found = exact_findings(text, res.raw_text, res.dropped_text, ref,
                                        pages)
+                # Text the PDF holds only as a picture — a table, a scanned
+                # annex — is not in its text layer. Read the pictures, but only
+                # when something is unexplained: a clean file costs nothing.
+                if can_read_pictures and any(f.kind in PICTURE_KINDS for f in found):
+                    pictures = read_pictures(Path(pdf_path), settings, progress)
+                    if pictures.strip():
+                        found = exact_findings(
+                            text, res.raw_text, res.dropped_text, ref, pages,
+                            pictures=pictures)
             findings += found
+        findings += _sideways_pages(res.stats.get("sideways_pages") or [], spans)
 
     # Place every text-located finding on its page. A passage with no
     # counterpart on a page the recogniser itself struggled to read is more

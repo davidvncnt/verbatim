@@ -219,3 +219,38 @@ def test_text_set_sideways_in_the_margin_is_set_aside():
         at += len(line) + 1
     aside = _set_aside(Reference(text, spans), [{"page": 1, "height": 842}])
     assert [text[a:b] for a, b in aside] == [text.split("\n")[-1]]
+
+
+# --- reported by the team after the first version ------------------------
+
+def test_a_repetition_the_pdf_has_is_not_a_loop():
+    """A vessel list where every column says "Not known" repeats in the PDF
+    just as much; a model's loop does not."""
+    from verbatim.qa.external import _unloop
+    row = "ZHOU YU 651 unknown Not known Not known Not known Not known Not known\n"
+    text = row * 30
+    loop = Finding(kind="repetition_loop", severity=HIGH, key="repetition_loop")
+    assert _unloop([loop], text, letters.fold(text)[0]) == []
+    assert _unloop([loop], text, letters.fold(row)[0]) == [loop]
+
+
+def test_a_signature_line_is_never_the_place_of_a_loop():
+    from verbatim.qa.intrinsic import _locate_repetition
+    text = ("Chair of the Conference of the Parties\n" * 3 + "_" * 40 + "\n") * 2
+    a, b = _locate_repetition(text, 8)
+    assert a is not None and "_" not in text[a:b]
+
+
+def test_numbers_on_following_lines_are_one_finding():
+    """A table the PDF prints as a picture: one finding, not one per row."""
+    text = "Albania\t0,62%\nAndorra\t0,62%\nBulgaria\t0,62%\n\nOther text\n\nCyprus 0,71%"
+    found = _absent_numbers(text, "Table 2. Contributions", [])
+    assert len(found) == 2
+    assert found[0].params["n"] == 3
+
+
+def test_a_digit_misread_in_a_picture_is_tolerated():
+    """The text has 0,07 where the reading of the picture has 0,01 or 0,0/:
+    the recogniser's error, far more often than the text's."""
+    assert _absent_numbers("Syria 0,07", "no numbers here", [], misread_in="Syria 0,01") == []
+    assert _absent_numbers("Syria 0,07", "no numbers here", [])

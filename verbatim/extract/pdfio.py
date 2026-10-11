@@ -45,9 +45,15 @@ def release(page):
             pass
 
 
-def straighten(path: Path, tmpdir: str, verbose=False, log=print):
-    """Rewrite the PDF so that every page reads left to right."""
-    angles = {}
+def straighten(path: Path, tmpdir: str, verbose=False, log=print,
+               found: dict | None = None):
+    """Rewrite the PDF so that every page reads left to right.
+
+    `found`, if given, receives {page index: angle} for the pages that were
+    printed sideways: a table turned to fit a portrait page is where earlier
+    conversions went most wrong, so the reviewer is told where they are.
+    """
+    angles = {} if found is None else found
     with pdfplumber.open(str(path)) as pdf:
         for i, page in enumerate(pdf.pages):
             c = Counter(text_angle(ch) for ch in page.chars)

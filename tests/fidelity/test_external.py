@@ -45,8 +45,10 @@ def test_clean_files_raise_nothing(synthetic_pdfs, tmp_path, style):
         text = old_style(pdf) if style == "old" else convert(
             pdf, Settings(ocr="off"), log=lambda *a, **k: None).text
         record = run(tmp_path, text, pdf)
-        assert record["assessment"]["findings"] == [], (
-            pdf.name, [f["message_en"] for f in record["assessment"]["findings"]])
+        # A sideways page is pointed out even when its text is right.
+        found = [f for f in record["assessment"]["findings"]
+                 if f["kind"] != "sideways_page"]
+        assert found == [], (pdf.name, [f["message_en"] for f in found])
 
 
 def test_a_garbled_old_reading_is_caught(synthetic_dir, tmp_path):
@@ -57,6 +59,19 @@ def test_a_garbled_old_reading_is_caught(synthetic_dir, tmp_path):
                  synthetic_dir / "sideways.pdf")
     assert record["assessment"]["verdict"] == "reject"
     assert {"invented_text", "invented_numbers"} & set(kinds(record))
+
+
+def test_a_page_printed_sideways_is_pointed_out(synthetic_dir, tmp_path):
+    """A table turned to fit a portrait page is where earlier conversions
+    went most wrong, so the page is shown even if its text is right."""
+    pdf = synthetic_dir / "sideways.pdf"
+    text = convert(pdf, Settings(ocr="off"), log=lambda *a, **k: None).text
+    record = run(tmp_path, text, pdf)
+    turned = [f for f in record["assessment"]["findings"] if f["kind"] == "sideways_page"]
+    assert [f["page"] for f in turned] == [1]
+    assert turned[0]["char_start"] is not None, "the page's lines are highlighted"
+    clean = run(tmp_path, old_style(synthetic_dir / "simple.pdf"), synthetic_dir / "simple.pdf")
+    assert "sideways_page" not in kinds(clean)
 
 
 # --- damage ---------------------------------------------------------------

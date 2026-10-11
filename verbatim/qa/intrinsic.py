@@ -32,7 +32,9 @@ def _locate_repetition(text: str, n: int) -> tuple:
     """Where the loop starts to repeat: the second copy of the most repeated
     prose line, or failing that of the most frequent n-word sequence."""
     prose = prose_lines(text)
-    lines = [ln.strip() for ln in prose.splitlines() if len(ln.strip()) > 3]
+    # A line of underscores or dots is a signature or a leader, not a loop.
+    lines = [ln.strip() for ln in prose.splitlines()
+             if sum(c.isalpha() for c in ln) > 3]
     if lines:
         line, count = Counter(lines).most_common(1)[0]
         if count >= 3:
