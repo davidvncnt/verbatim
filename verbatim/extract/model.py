@@ -115,4 +115,5 @@ class PageData:
     ocr_conf: float = 0.0
     ocr_text: str = ""
     raw_text: str = ""                              # text layer, for fidelity
+    relaid: bool = False            # a garbled text layer was read again
     dropped_lines: list = field(default_factory=list)  # removed on purpose

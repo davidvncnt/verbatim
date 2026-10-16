@@ -429,6 +429,21 @@ def _missing_text(text: str, ref: Reference, pages: list,
     return findings
 
 
+def _page_list(pages: list) -> str:
+    """[1, 2, 3, 5] -> "1-3, 5"."""
+    out, run = [], []
+    for p in pages:
+        if run and p == run[-1] + 1:
+            run.append(p)
+            continue
+        if run:
+            out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+        run = [p]
+    if run:
+        out.append(f"{run[0]}-{run[-1]}" if len(run) > 1 else str(run[0]))
+    return ", ".join(out)
+
+
 def _sideways_pages(turned: list, spans: list) -> list:
     """One finding per page printed sideways, with the lines of the text that
     belong to it.
@@ -713,6 +728,15 @@ def check(txt_path: Path, *, pdf_path: Path | None, mode: str = FULL,
                             pictures=pictures)
             findings += found
         findings += _sideways_pages(res.stats.get("sideways_pages") or [], spans)
+        relaid = res.stats.get("relaid_pages") or []
+        if relaid:
+            # The PDF's own text was an old, garbled recognition. A text copied
+            # from it carries its errors, and comparing the text with that same
+            # layer would have found none of them.
+            findings.append(Finding(
+                kind="poor_text_layer", severity=MEDIUM, key="poor_text_layer",
+                params={"n": len(relaid), "pages": _page_list(relaid)},
+                page=relaid[0]))
 
     # Place every text-located finding on its page. A passage with no
     # counterpart on a page the recogniser itself struggled to read is more

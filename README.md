@@ -33,6 +33,14 @@ produit un fichier `.txt` par document :
 - les mises en page à deux colonnes lues dans le bon ordre, les pages imprimées
   à l'horizontale redressées.
 
+**Ne pas recopier un texte abîmé.** Beaucoup d'anciennes numérisations portent
+un texte invisible ajouté il y a longtemps par un logiciel de reconnaissance de
+caractères, souvent de mauvaise qualité : « contr6lCs » pour « contrôlés »,
+« L la » pour « à la », du russe lu comme des lettres latines. verbatim relit
+ces pages avec Tesseract, dans la langue de chaque page, et garde la meilleure
+des deux lectures. Les fichiers déjà copiés d'un tel texte sont signalés dans
+l'onglet *Vérifier*.
+
 **Sans rien inventer.** Chaque mot du texte vient du PDF. Quand le PDF contient
 du texte sélectionnable, verbatim le lit directement, sans intelligence
 artificielle. Quand c'est une numérisation, les pages sont lues par Mistral, un
@@ -444,6 +452,10 @@ médiocres.
   enregistrées **sur votre ordinateur seulement** : rien n'est écrit dans le
   dossier vérifié. Vos collègues ne voient donc pas les décisions que vous avez
   prises sur ces fichiers.
+- Si vous déplacez ou renommez un dossier déjà vérifié, verbatim retrouve le
+  travail fait à l'ancien emplacement la première fois que vous l'ouvrez au
+  nouveau, et l'indique en bas de la fenêtre. Choisissez de nouveau le
+  **Dossier des PDF** s'il a été déplacé lui aussi.
 
 ### En ligne de commande
 

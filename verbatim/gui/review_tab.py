@@ -689,6 +689,7 @@ class ReviewTab(ttk.Frame):
 
         self.store = LocalStore(folder)
         texts = sorted(folder.glob("*.txt"))
+        moved_from = self.store.adopt_moved({t.name for t in texts})
         recorded = {p.name for p in folder.glob("*" + sidecar.SUFFIX)}
         triage = self.store.triage()
         entries = []
@@ -719,6 +720,8 @@ class ReviewTab(ttk.Frame):
         self.queue.selection_clear(0, "end")
         self.queue.selection_set(0)
         self._file_chosen()
+        if moved_from is not None:
+            self.v_status.set(i18n.t("review.moved", path=moved_from))
         self._start_triage()
 
     def _decided(self, entry: Entry) -> bool:

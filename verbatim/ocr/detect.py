@@ -26,6 +26,9 @@ _LANG_HINTS = {
            "pelo pela seus suas entre quando",
     "nld": "de het een van en dat is op met voor zijn niet aan door worden werd "
            "deze wordt bij ook naar over",
+    # with and without its letters ä and ö, which old text layers often lose
+    "fin": "ja ei tai kun joka jotka sekä seka tämä tama että etta myös myos "
+           "olla ovat oli niin mutta kuin sopimus valtion",
 }
 _LANG_SETS = {k: set(v.split()) for k, v in _LANG_HINTS.items()}
 _LANG_SEEN = Counter(w for v in _LANG_SETS.values() for w in v)
@@ -34,7 +37,7 @@ LANG_MARKERS = {k: {w for w in v if _LANG_SEEN[w] == 1} for k, v in _LANG_SETS.i
 
 LANG_NAMES = {"eng": "English", "fra": "French", "spa": "Spanish",
               "deu": "German", "ita": "Italian", "por": "Portuguese",
-              "nld": "Dutch"}
+              "nld": "Dutch", "fin": "Finnish"}
 
 
 def detect_language(text, candidates):

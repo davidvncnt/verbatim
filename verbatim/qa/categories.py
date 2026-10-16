@@ -40,7 +40,8 @@ CATEGORIES = (
         "control_characters"}), True),
     Category("sideways", frozenset({"sideways_page"}), True),
     Category("scan", frozenset({
-        "scan_unchecked", "ocr_confidence", "no_text_layer", "model_pages"}), True),
+        "scan_unchecked", "ocr_confidence", "no_text_layer", "model_pages",
+        "poor_text_layer"}), True),
     Category("encoding", frozenset({"garbled_characters"}), False),
     Category("spelling", frozenset({"spelling_variants", "minor_drift"}), False),
     Category("missing", frozenset({
