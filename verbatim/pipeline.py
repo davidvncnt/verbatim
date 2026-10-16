@@ -38,9 +38,10 @@ from .extract.paragraphs import build_paragraphs, join_lines, metrics
 from .extract.pdfio import release, straighten
 from .extract.text import BULLET_RE, HYPHENS, LOWER_START_RE, TERMINAL_RE, alnum_count, squeeze
 from .ocr.detect import needs_ocr
+from .ocr.layer import MIN_CONF, LayerJudge, full_page_picture, layer_words
 from .ocr.markdown import markdown_to_blocks
 from .ocr.mistral import mistral_ocr
-from .ocr.tesseract import _copy_with, auto_language, ocr_tesseract
+from .ocr.tesseract import _copy_with, ocr_tesseract, page_language
 from .profiles import get as get_profile
 from .profiles import opens_structural_unit
 
@@ -154,33 +155,74 @@ def convert(path: Path, args, progress=None, log=print) -> ConversionResult:
         work = straighten(path, tmp, args.verbose, log, found=turned)
         st["sideways_pages"] = sorted(i + 1 for i in turned)
         pages, pending = [], []
+        judge = LayerJudge()
+        held: dict = {}                 # page number -> a reading not yet used
+        remembered: dict = {}           # language found by a trial reading
+        base = args
+
+        def read_with_tesseract(page, pd, layer_text=""):
+            page_args = base
+            if base.ocr_language == "auto":
+                tick(pd.number - 1, total, f"page {pd.number}/{total} (identifying language)")
+                page_args = _copy_with(base, ocr_language=page_language(
+                    page, base, layer_text, remembered, log))
+            tick(pd.number - 1, total, f"reading page {pd.number}/{total} (OCR)")
+            return ocr_tesseract(page, page_args)
+
+        def use_reading(pd, reading, replacing=False):
+            w, c, conf = reading
+            if not w or (replacing and conf < MIN_CONF):
+                return
+            pd.words, pd.chars, pd.ocr = w, c, True
+            pd.ocr_conf = conf
+            pd.raw_chars = sum(len(x["text"]) for x in w)
+            pd.raw_alnum = sum(alnum_count(x["text"]) for x in w)
+            pd.looks_scanned = False
+            if replacing:
+                # Nothing read from the old layer is kept: not its tables,
+                # and not its text as the yardstick for this page.
+                pd.tables, pd.raw_text, pd.relaid = [], "", True
+
         with pdfplumber.open(str(work)) as pdf:
             total = len(pdf.pages)
             for i, page in enumerate(pdf.pages, 1):
                 tick(i - 1, total, f"page {i}/{total}")
                 pd = read_page(page, i, args)
-                if args.ocr != "off" and needs_ocr(pd, args.ocr):
-                    if (args.ocr_engine == "tesseract"
-                            and args.ocr_language == "auto"):
-                        tick(i - 1, total, f"page {i}/{total} (identifying language)")
-                        chosen = auto_language(page, args, log)
-                        args = _copy_with(args, ocr_language=chosen)
-                    if args.ocr_engine == "tesseract":
-                        tick(i - 1, total, f"reading page {i}/{total} (OCR)")
-                        try:
-                            w, c, conf = ocr_tesseract(page, args)
-                            if w:
-                                pd.words, pd.chars, pd.ocr = w, c, True
-                                pd.ocr_conf = conf
-                                pd.raw_chars = sum(len(x["text"]) for x in w)
-                                pd.raw_alnum = sum(alnum_count(x["text"]) for x in w)
-                                pd.looks_scanned = False
-                        except Exception as exc:
-                            log(f"   ! OCR failed on page {i}: {exc}")
-                    else:
-                        pending.append(i)
+                scanned = args.ocr != "off" and needs_ocr(pd, args.ocr)
+                # A scan with an old recognition laid over it: read it again
+                # and keep whichever reading is sound (see ocr.layer).
+                relay = (not scanned and args.ocr != "off"
+                         and args.ocr_engine == "tesseract"
+                         and judge.verdict != "sound" and full_page_picture(page))
+                if scanned and args.ocr_engine != "tesseract":
+                    pending.append(i)
+                elif scanned or relay:
+                    try:
+                        reading = read_with_tesseract(page, pd, pd.raw_text if relay else "")
+                    except Exception as exc:
+                        log(f"   ! OCR failed on page {i}: {exc}")
+                        reading = None
+                    if reading and scanned:
+                        use_reading(pd, reading)
+                    elif reading:
+                        judge.add(layer_words(pd.words), reading[0])
+                        held[i] = reading
                 pages.append(pd)
+                if judge.verdict == "poor":
+                    for pd_held in pages:
+                        if pd_held.number in held:
+                            use_reading(pd_held, held.pop(pd_held.number), replacing=True)
                 release(page)
+        judge.decide(final=True)
+        if judge.verdict == "poor":
+            for pd in pages:
+                if pd.number in held:
+                    use_reading(pd, held.pop(pd.number), replacing=True)
+        st["relaid_pages"] = [pd.number for pd in pages if getattr(pd, "relaid", False)]
+        if st["relaid_pages"]:
+            log(f"   the text layer of {len(st['relaid_pages'])} scanned page(s) was "
+                f"an old, garbled recognition ({judge.share:.0%} of clearly read "
+                "words missing): read again with Tesseract")
         if pending:
             if args.ocr == "always":
                 log(f"   OCR = always: sending all {len(pending)} page(s) to "

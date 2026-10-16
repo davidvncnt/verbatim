@@ -254,3 +254,79 @@ def test_the_source_folder_is_not_modified(simple, tmp_path):
     txt.write_text(text, encoding="utf-8")
     check(txt, pdf_path=find_pdf(txt, folder), ocr=False)
     assert sorted(p.name for p in folder.iterdir()) == before
+
+
+# --- a scan carrying an old recognition's text ------------------------------
+
+def _garble(word: str) -> str:
+    """What the old recognisers did to these scans: "contr6lCs", "]a"."""
+    return word.replace("e", "c").replace("o", "6").replace("l", "1")
+
+
+@pytest.fixture(scope="module")
+def layered(synthetic_dir, tmp_path_factory):
+    """simple.pdf as page pictures, with an invisible text layer over them:
+    once faithful, once garbled the way old recognisers garbled it."""
+    import sys
+    from pathlib import Path
+
+    from pypdf import PdfReader, PdfWriter
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "synthetic"))
+    from makepdf import Page, write_pdf
+
+    out = tmp_path_factory.mktemp("layered")
+    src = synthetic_dir / "simple.pdf"
+    with pdfplumber.open(str(src)) as doc:
+        pictures = [p.to_image(resolution=200).original.convert("RGB") for p in doc.pages]
+        lines = [(float(p.height), p.extract_text_lines()) for p in doc.pages]
+    scan = out / "scan.pdf"
+    pictures[0].save(scan, save_all=True, append_images=pictures[1:], resolution=200)
+    made = {}
+    for name, spoil in (("sound", lambda w: w), ("garbled", _garble)):
+        pages = []
+        for height, page_lines in lines:
+            page = Page()
+            for ln in page_lines:
+                words = ln["text"].split()
+                text = " ".join(spoil(w) if i % 2 else w for i, w in enumerate(words))
+                page.text(ln["x0"], height - ln["bottom"] + 2, text, size=10, invisible=True)
+            pages.append(page)
+        layer = write_pdf(out / f"{name}-layer.pdf", pages)
+        writer = PdfWriter()
+        for picture, text in zip(PdfReader(str(scan)).pages, PdfReader(str(layer)).pages):
+            picture.merge_page(text)
+            writer.add_page(picture)
+        made[name] = out / f"{name}.pdf"
+        with open(made[name], "wb") as fh:
+            writer.write(fh)
+    return made
+
+
+def _convert_with_ocr(pdf):
+    from verbatim.ocr.detect import resolve_languages
+    settings = Settings(ocr="auto", ocr_engine="tesseract")
+    resolve_languages(settings, log=lambda *a, **k: None)
+    return convert(pdf, settings, log=lambda *a, **k: None)
+
+
+@pytest.mark.skipif(not _tesseract(), reason="Tesseract is not installed")
+def test_a_garbled_text_layer_is_read_again(layered):
+    """verbatim used to copy such a layer faithfully, errors and all."""
+    res = _convert_with_ocr(layered["garbled"])
+    assert res.stats["relaid_pages"] == [1, 2, 3]
+    assert "Subsidiary Body for Implementation" in res.text
+    assert "Subsidiary B6dy" not in res.text
+
+
+@pytest.mark.skipif(not _tesseract(), reason="Tesseract is not installed")
+def test_a_sound_text_layer_is_kept(layered):
+    res = _convert_with_ocr(layered["sound"])
+    assert res.stats["relaid_pages"] == []
+    assert "Subsidiary Body for Implementation" in res.text
+
+
+@pytest.mark.skipif(not _tesseract(), reason="Tesseract is not installed")
+def test_a_text_copied_from_a_garbled_layer_is_pointed_out(layered, tmp_path):
+    record = run(tmp_path, old_style(layered["garbled"]), layered["garbled"], ocr=True)
+    found = [f for f in record["assessment"]["findings"] if f["kind"] == "poor_text_layer"]
+    assert found and found[0]["params"]["pages"] == "1-3"

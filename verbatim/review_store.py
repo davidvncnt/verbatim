@@ -89,13 +89,62 @@ class LocalStore:
         ident = hashlib.sha1(str(self.folder).encode("utf-8")).hexdigest()[:16]
         # Looked up on each use rather than imported, so that the test suite's
         # temporary settings folder is the one used.
-        self.dir = (Path(root) if root else settings.config_dir() / "review") / ident
+        self.root = Path(root) if root else settings.config_dir() / "review"
+        self.dir = self.root / ident
         self._decisions: dict | None = None
         # The index of full checks is written from the checking thread and
         # read from the window, and two writers would race on the same file.
         self._lock = threading.Lock()
         self._index: dict | None = None
         self._index_dirty = False
+
+    # -- a folder that was moved ------------------------------------------------
+
+    def adopt_moved(self, names: set) -> Path | None:
+        """Take over what was recorded for this folder at its old place.
+
+        Records are filed under the folder's full path, so moving or renaming
+        it seems to lose every check and decision. They are still on disk,
+        under the old path. A record is taken over when its folder no longer
+        exists and the file names it knows are, nearly all, files of this
+        folder. Returns the old path, or None.
+        """
+        if not names or (self.dir / "folder.json").exists():
+            return None
+        best, best_score = None, 0.0
+        try:
+            candidates = [d for d in self.root.iterdir() if d.is_dir() and d != self.dir]
+        except OSError:
+            return None
+        for d in candidates:
+            old = _read_json(d / "folder.json", {}).get("folder")
+            if not old or Path(old).exists():
+                continue                  # copied, not moved: leave it be
+            known = set(_read_json(d / "decisions.json", {})) | set(
+                _read_json(d / "triage.json", {}))
+            try:
+                known |= {p.name[:-5] for p in (d / "checks").glob("*.json")}
+            except OSError:
+                pass
+            if not known:
+                continue
+            score = len(known & names) / len(known)
+            if Path(old).name == self.folder.name:
+                score += 0.01             # same name: the likelier of two
+            if score > best_score:
+                best, best_score = (d, old), score
+        if best is None or best_score < 0.8:
+            return None
+        d, old = best
+        try:
+            os.replace(d, self.dir)
+        except OSError:
+            return None
+        _write_json(self.dir / "folder.json",
+                    {"folder": str(self.folder), "moved_from": old})
+        self._decisions = None
+        self._index = None
+        return Path(old)
 
     def _touch_folder_note(self) -> None:
         note = self.dir / "folder.json"

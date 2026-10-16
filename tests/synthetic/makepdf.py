@@ -35,6 +35,7 @@ class Text:
     size: float = 10.0
     bold: bool = False
     angle: int = 0               # 0 or 90; 90 prints the run sideways
+    invisible: bool = False      # as a recogniser lays its text over a scan
 
     def ops(self) -> bytes:
         font = b"/F2" if self.bold else b"/F1"
@@ -46,7 +47,8 @@ class Text:
             m = b"0 -1 1 0"
         else:
             m = b"1 0 0 1"
-        return (b"BT " + font + b" " + f"{self.size:g}".encode() + b" Tf "
+        mode = b"3 Tr " if self.invisible else b""
+        return (b"BT " + mode + font + b" " + f"{self.size:g}".encode() + b" Tf "
                 + m + b" " + f"{self.x:g} {self.y:g}".encode() + b" Tm ("
                 + _esc(self.s) + b") Tj ET\n")
 
@@ -70,8 +72,8 @@ class Page:
     height: float = A4[1]
     items: list = field(default_factory=list)
 
-    def text(self, x, y, s, size=10.0, bold=False, angle=0):
-        self.items.append(Text(x, y, s, size, bold, angle))
+    def text(self, x, y, s, size=10.0, bold=False, angle=0, invisible=False):
+        self.items.append(Text(x, y, s, size, bold, angle, invisible))
         return self
 
     def rule(self, x0, y0, x1, y1, width=0.75):

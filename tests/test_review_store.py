@@ -117,3 +117,48 @@ def test_a_full_check_is_remembered_for_the_list(tmp_path):
 
     txt.write_text("text, edited", encoding="utf-8")
     assert again.checked(txt, crosscheck_conf=0.7, **options) is None
+
+
+def test_a_moved_folder_keeps_its_decisions(tmp_path):
+    """Records are filed under the folder's path; moving the folder must not
+    seem to lose them."""
+    old = tmp_path / "old" / "decisions"
+    old.mkdir(parents=True)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (old / name).write_text("text", encoding="utf-8")
+    store = LocalStore(old, root=tmp_path / "prefs")
+    store.record_decision("a.txt", verdict="accepted", reviewer="RA1")
+    store.save_triage({"a.txt": {}, "b.txt": {}, "c.txt": {}})
+
+    new = tmp_path / "new" / "renamed"
+    new.parent.mkdir()
+    old.rename(new)
+    moved = LocalStore(new, root=tmp_path / "prefs")
+    assert moved.decision("a.txt") is None            # not found yet
+    assert moved.adopt_moved({"a.txt", "b.txt", "c.txt"}) == old.resolve()
+    assert moved.decision("a.txt")["verdict"] == "accepted"
+    assert moved.adopt_moved({"a.txt"}) is None         # only once
+
+
+def test_a_copied_folder_does_not_take_the_original_records(tmp_path):
+    folder = tmp_path / "orig"
+    folder.mkdir()
+    (folder / "a.txt").write_text("text", encoding="utf-8")
+    LocalStore(folder, root=tmp_path / "prefs").record_decision(
+        "a.txt", verdict="accepted", reviewer="RA1")
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    store = LocalStore(copy, root=tmp_path / "prefs")
+    assert store.adopt_moved({"a.txt"}) is None
+
+
+def test_another_folder_is_not_mistaken_for_a_moved_one(tmp_path):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    store = LocalStore(gone, root=tmp_path / "prefs")
+    store.record_decision("x.txt", verdict="accepted", reviewer="RA1")
+    store.record_decision("y.txt", verdict="accepted", reviewer="RA1")
+    gone.rmdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    assert LocalStore(other, root=tmp_path / "prefs").adopt_moved({"x.txt", "z.txt"}) is None
